@@ -1,0 +1,20 @@
+{
+  "name": "koishi-plugin-aka-ai-generator",
+  "description": "自用AI生成插件",
+  "version": "0.0.1",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin"
+  ],
+  "peerDependencies": {
+    "koishi": "^4.18.9"
+  }
+}
