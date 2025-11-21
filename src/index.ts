@@ -9,6 +9,8 @@ export const name = 'aka-ai-generator'
 const COMMANDS = {
   GENERATE_IMAGE: '生成图像',
   COMPOSE_IMAGE: '合成图像',
+  CHANGE_POSE: '改姿势',
+  OPTIMIZE_DESIGN: '优化设计',
   QUERY_QUOTA: '图像额度',
   RECHARGE: '图像充值',
   RECHARGE_HISTORY: '图像充值记录',
@@ -162,7 +164,7 @@ export const Config: Schema<Config> = Schema.intersect([
       {
         commandName: '变写实',
         commandDescription: '以真实摄影风格重建主体',
-        prompt: '请根据用户提供的图片，在保持主体身份、外观与姿态的前提下生成一张超写实的摄影作品。确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素，整体效果需像专业摄影棚拍摄。',
+        prompt: '请根据用户提供的图片，在保持主体身份、外观与姿态的前提下生成一张超写实的摄影作品。采用Ultra-realistic 3D rendered风格，确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界。画面应呈现raw and natural的原始自然感，具有authentic film snapshot的真实胶片质感。使用strong contrast between light and dark营造强烈明暗对比，产生deep shadows深阴影效果。整体需具备tactile feel触感质感和simulated texture模拟纹理细节，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素，整体效果需像专业摄影棚拍摄的真实照片。',
         enabled: true
       },
       {
@@ -217,6 +219,8 @@ export function apply(ctx: Context, config: Config) {
       ...getStyleCommands(),
       { name: COMMANDS.GENERATE_IMAGE, description: '使用自定义prompt进行图像处理' },
       { name: COMMANDS.COMPOSE_IMAGE, description: '合成多张图片，使用自定义prompt控制合成效果' },
+      { name: COMMANDS.CHANGE_POSE, description: '改变图像主体的姿势造型，保持主体细节和风格不变' },
+      { name: COMMANDS.OPTIMIZE_DESIGN, description: '优化图像主体的结构设计，保持原有设计语言和风格' },
       { name: COMMANDS.QUERY_QUOTA, description: '查询用户额度信息' }
     ],
     // 管理员指令
@@ -653,9 +657,18 @@ export function apply(ctx: Context, config: Config) {
       
       activeTasks.delete(userId)
       
-    } catch (error) {
+    } catch (error: any) {
       activeTasks.delete(userId)
       logger.error('图像处理失败', { userId, error })
+      
+      // 如果是明确的错误信息（如内容策略拦截），直接返回
+      if (error?.message && (
+        error.message.includes('内容被安全策略拦截') ||
+        error.message.includes('生成失败') ||
+        error.message.includes('处理失败')
+      )) {
+        return error.message
+      }
       
       // 不返回具体错误信息，避免泄露API密钥或其他敏感信息
       return '图像处理失败，请稍后重试'
@@ -823,9 +836,18 @@ export function apply(ctx: Context, config: Config) {
             
             activeTasks.delete(userId)
             
-          } catch (error) {
+          } catch (error: any) {
             activeTasks.delete(userId)
             logger.error('自定义图像处理失败', { userId, error })
+            
+            // 如果是明确的错误信息（如内容策略拦截），直接返回
+            if (error?.message && (
+              error.message.includes('内容被安全策略拦截') ||
+              error.message.includes('生成失败') ||
+              error.message.includes('处理失败')
+            )) {
+              return error.message
+            }
             
             // 不返回具体错误信息，避免泄露API密钥或其他敏感信息
             return '图像处理失败，请稍后重试'
@@ -965,9 +987,18 @@ export function apply(ctx: Context, config: Config) {
             
             activeTasks.delete(userId)
             
-          } catch (error) {
+          } catch (error: any) {
             activeTasks.delete(userId)
             logger.error('图片合成失败', { userId, error })
+            
+            // 如果是明确的错误信息（如内容策略拦截），直接返回
+            if (error?.message && (
+              error.message.includes('内容被安全策略拦截') ||
+              error.message.includes('生成失败') ||
+              error.message.includes('处理失败')
+            )) {
+              return error.message
+            }
             
             // 不返回具体错误信息，避免泄露API密钥或其他敏感信息
             return '图片合成失败，请稍后重试'
@@ -982,6 +1013,42 @@ export function apply(ctx: Context, config: Config) {
         logger.error('图片合成超时或失败', { userId, error })
         return error.message === '命令执行超时' ? '图片合成超时，请重试' : '图片合成失败，请稍后重试'
       })
+    })
+
+  // 改姿势命令
+  ctx.command(`${COMMANDS.CHANGE_POSE} [img:text]`, '改变图像主体的姿势造型，保持主体细节和风格不变')
+    .option('num', '-n <num:number> 生成图片数量 (1-4)')
+    .action(async ({ session, options }, img) => {
+      if (!session?.userId) return '会话无效'
+      
+      // 检查每日调用限制
+      const limitCheck = await checkDailyLimit(session.userId)
+      if (!limitCheck.allowed) {
+        return limitCheck.message
+      }
+      
+      // 改姿势的prompt，强调保持主体细节和风格，只改变姿势
+      const posePrompt = '请根据用户提供的图片，在严格保持主体身份、外观特征、服装细节、艺术风格和整体氛围不变的前提下，生成一个新的姿势造型。新姿势应该更加帅气、可爱、有张力或符合主体内容的动态感，展现出更好的视觉表现力。要求：1. 完全保持主体的面部特征、发型、服装、配饰等所有细节不变；2. 完全保持原有的艺术风格（如二次元、写实、手绘等）不变；3. 只改变身体的姿势、动作和姿态，让主体看起来更有活力和表现力；4. 姿势应该自然、协调，符合主体的身份和性格特征；5. 保持背景环境的基本风格不变（可以适当调整视角或构图）。'
+      
+      return processImageWithTimeout(session, img, posePrompt, COMMANDS.CHANGE_POSE, options?.num)
+    })
+
+  // 优化设计命令
+  ctx.command(`${COMMANDS.OPTIMIZE_DESIGN} [img:text]`, '优化图像主体的结构设计，保持原有设计语言和风格')
+    .option('num', '-n <num:number> 生成图片数量 (1-4)')
+    .action(async ({ session, options }, img) => {
+      if (!session?.userId) return '会话无效'
+      
+      // 检查每日调用限制
+      const limitCheck = await checkDailyLimit(session.userId)
+      if (!limitCheck.allowed) {
+        return limitCheck.message
+      }
+      
+      // 优化设计的prompt，强调保持原有设计语言，合理优化结构设计
+      const designPrompt = '请根据用户提供的图片，在严格保持原有设计语言、视觉风格、功能特征和整体主题不变的前提下，对图像主体的结构设计进行优化。要求：1. 完全保持原有的设计语言和视觉风格（如现代简约、复古、科幻、奇幻等）不变；2. 保持主体的核心功能特征和身份定位不变；3. 可以合理且美观地添加、删改或优化结构元素（如装饰细节、功能组件、线条轮廓、比例关系等），使设计更加完善和美观；4. 所有优化必须符合原有主题的视觉风格，增强设计美感而不破坏原有设计语言；5. 优化后的设计应该更加协调、统一，具有更好的视觉层次和设计完整性；6. 保持色彩方案、材质质感和整体氛围的一致性。'
+      
+      return processImageWithTimeout(session, img, designPrompt, COMMANDS.OPTIMIZE_DESIGN, options?.num)
     })
 
   // 充值管理命令

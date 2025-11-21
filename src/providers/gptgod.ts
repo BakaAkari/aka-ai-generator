@@ -396,6 +396,15 @@ export class GptGodProvider implements ImageProvider {
       
       return images
     } catch (error: any) {
+      // 如果是内容策略错误或其他已明确处理的错误，直接抛出原错误
+      if (error?.message && (
+        error.message.includes('内容被安全策略拦截') ||
+        error.message.includes('生成失败') ||
+        error.message.includes('处理失败')
+      )) {
+        throw error
+      }
+      
       logger.error('GPTGod 图像编辑 API 调用失败', {
         message: error?.message || '未知错误',
         code: error?.code,
