@@ -10,7 +10,7 @@ const COMMANDS = {
   GENERATE_IMAGE: '生成图像',
   COMPOSE_IMAGE: '合成图像',
   CHANGE_POSE: '改姿势',
-  OPTIMIZE_DESIGN: '优化设计',
+  OPTIMIZE_DESIGN: '修改设计',
   QUERY_QUOTA: '图像额度',
   RECHARGE: '图像充值',
   RECHARGE_HISTORY: '图像充值记录',
@@ -220,7 +220,7 @@ export function apply(ctx: Context, config: Config) {
       { name: COMMANDS.GENERATE_IMAGE, description: '使用自定义prompt进行图像处理' },
       { name: COMMANDS.COMPOSE_IMAGE, description: '合成多张图片，使用自定义prompt控制合成效果' },
       { name: COMMANDS.CHANGE_POSE, description: '改变图像主体的姿势造型，保持主体细节和风格不变' },
-      { name: COMMANDS.OPTIMIZE_DESIGN, description: '优化图像主体的结构设计，保持原有设计语言和风格' },
+      { name: COMMANDS.OPTIMIZE_DESIGN, description: '修改图像主体的结构设计，保持原有设计语言和风格' },
       { name: COMMANDS.QUERY_QUOTA, description: '查询用户额度信息' }
     ],
     // 管理员指令
@@ -1033,8 +1033,8 @@ export function apply(ctx: Context, config: Config) {
       return processImageWithTimeout(session, img, posePrompt, COMMANDS.CHANGE_POSE, options?.num)
     })
 
-  // 优化设计命令
-  ctx.command(`${COMMANDS.OPTIMIZE_DESIGN} [img:text]`, '优化图像主体的结构设计，保持原有设计语言和风格')
+  // 修改设计命令
+  ctx.command(`${COMMANDS.OPTIMIZE_DESIGN} [img:text]`, '修改图像主体的结构设计，保持原有设计语言和风格')
     .option('num', '-n <num:number> 生成图片数量 (1-4)')
     .action(async ({ session, options }, img) => {
       if (!session?.userId) return '会话无效'
@@ -1045,8 +1045,8 @@ export function apply(ctx: Context, config: Config) {
         return limitCheck.message
       }
       
-      // 优化设计的prompt，强调保持原有设计语言，合理优化结构设计
-      const designPrompt = '请根据用户提供的图片，在严格保持原有设计语言、视觉风格、功能特征和整体主题不变的前提下，对图像主体的结构设计进行优化。要求：1. 完全保持原有的设计语言和视觉风格（如现代简约、复古、科幻、奇幻等）不变；2. 保持主体的核心功能特征和身份定位不变；3. 可以合理且美观地添加、删改或优化结构元素（如装饰细节、功能组件、线条轮廓、比例关系等），使设计更加完善和美观；4. 所有优化必须符合原有主题的视觉风格，增强设计美感而不破坏原有设计语言；5. 优化后的设计应该更加协调、统一，具有更好的视觉层次和设计完整性；6. 保持色彩方案、材质质感和整体氛围的一致性。'
+      // 修改设计的prompt，强调保持原有设计语言，合理修改结构设计
+      const designPrompt = '请根据用户提供的图片，在严格保持原有设计语言、视觉风格、功能特征和整体主题不变的前提下，对图像主体的结构设计进行修改。要求：1. 完全保持原有的设计语言和视觉风格（如现代简约、复古、科幻、奇幻等）不变；2. 保持主体的核心功能特征和身份定位不变；3. 可以合理且美观地添加、删改或修改结构元素（如装饰细节、功能组件、线条轮廓、比例关系等），使设计更加完善和美观；4. 所有修改必须符合原有主题的视觉风格，增强设计美感而不破坏原有设计语言；5. 修改后的设计应该更加协调、统一，具有更好的视觉层次和设计完整性；6. 保持色彩方案、材质质感和整体氛围的一致性。'
       
       return processImageWithTimeout(session, img, designPrompt, COMMANDS.OPTIMIZE_DESIGN, options?.num)
     })
