@@ -42,7 +42,9 @@ async function downloadImageAsBase64(
       }
     }
     
-    logger.debug('图片下载并转换为Base64', { url, mimeType, size: base64.length })
+    if (logger) {
+      logger.debug('图片下载并转换为Base64', { url, mimeType, size: base64.length })
+    }
     return { data: base64, mimeType }
   } catch (error) {
     logger.error('下载图片失败', { url, error })
@@ -53,64 +55,179 @@ async function downloadImageAsBase64(
 /**
  * 解析 GPTGod 响应，提取图片 URL
  */
-function parseGptGodResponse(response: any): string[] {
+function parseGptGodResponse(response: any, logger?: any): string[] {
   try {
     const images: string[] = []
     
     // 检查是否有直接的图片 URL 数组
     if (Array.isArray(response.images)) {
+      if (logger) {
+        logger.debug('从 response.images 数组提取图片', { count: response.images.length })
+      }
       return response.images
     }
     
-    // 检查是否有 data: URL
-    if (response.image && typeof response.image === 'string' && response.image.startsWith('data:')) {
-      images.push(response.image)
+    // 检查是否有单个图片字段
+    if (response.image && typeof response.image === 'string') {
+      if (response.image.startsWith('data:') || response.image.startsWith('http')) {
+        if (logger) {
+          logger.debug('从 response.image 提取图片')
+        }
+        images.push(response.image)
+        return images
+      }
     }
     
+    // 检查 choices 数组
     if (response?.choices?.length > 0) {
       const firstChoice = response.choices[0]
       const messageContent = firstChoice.message?.content
       let contentText = ''
 
+      // 处理不同类型的 content
       if (typeof messageContent === 'string') {
         contentText = messageContent
       } else if (Array.isArray(messageContent)) {
-        contentText = messageContent.map((part: any) => part?.text || '').join('\n')
+        // 处理数组格式的 content（可能包含文本和图片）
+        for (const part of messageContent) {
+          if (part?.type === 'image_url' && part?.image_url?.url) {
+            if (logger) {
+              logger.debug('从 content 数组的 image_url 提取图片')
+            }
+            images.push(part.image_url.url)
+          } else if (part?.type === 'text' && part?.text) {
+            contentText += part.text + '\n'
+          } else if (part?.text) {
+            contentText += part.text + '\n'
+          }
+        }
       } else if (messageContent?.text) {
         contentText = messageContent.text
       }
 
-      // 匹配 Markdown 图片格式
-      const mdImageRegex = /!\[.*?\]\((https?:\/\/[^\)]+)\)/g
-      let match
-      while ((match = mdImageRegex.exec(contentText)) !== null) {
-        images.push(match[1])
+      // 如果已经从 content 数组提取到图片，直接返回
+      if (images.length > 0) {
+        return images
       }
 
-      // 匹配纯 URL
-      if (images.length === 0) {
-        const urlRegex = /(https?:\/\/[^\s"')]+\.(?:png|jpg|jpeg|webp|gif))/gi
-        let urlMatch
-        while ((urlMatch = urlRegex.exec(contentText)) !== null) {
-          images.push(urlMatch[1])
+      // 从文本内容中提取图片 URL
+      if (contentText) {
+        // 匹配 Markdown 图片格式
+        const mdImageRegex = /!\[.*?\]\((https?:\/\/[^\)]+)\)/g
+        let match
+        while ((match = mdImageRegex.exec(contentText)) !== null) {
+          images.push(match[1])
+        }
+
+        // 匹配纯 URL
+        if (images.length === 0) {
+          const urlRegex = /(https?:\/\/[^\s"')<>]+\.(?:png|jpg|jpeg|webp|gif|bmp))/gi
+          let urlMatch
+          while ((urlMatch = urlRegex.exec(contentText)) !== null) {
+            images.push(urlMatch[1])
+          }
+        }
+
+        // 如果内容本身就是 URL
+        if (images.length === 0 && contentText.trim().startsWith('http')) {
+          const trimmedUrl = contentText.trim().split(/\s/)[0]
+          if (trimmedUrl.match(/^https?:\/\//)) {
+            images.push(trimmedUrl)
+          }
+        }
+        
+        // 检查是否有 data: URL
+        const dataUrlRegex = /(data:image\/[^;]+;base64,[^\s"')<>]+)/gi
+        let dataUrlMatch
+        while ((dataUrlMatch = dataUrlRegex.exec(contentText)) !== null) {
+          images.push(dataUrlMatch[1])
         }
       }
-
-      // 如果内容本身就是 URL
-      if (images.length === 0 && contentText.trim().startsWith('http')) {
-        images.push(contentText.trim())
+      
+      // 检查 message 中是否有其他图片相关字段
+      if (images.length === 0 && firstChoice.message) {
+        // 检查是否有 image_url 字段
+        if (firstChoice.message.image_url) {
+          if (logger) {
+            logger.debug('从 message.image_url 提取图片')
+          }
+          images.push(firstChoice.message.image_url)
+        }
+        // 检查是否有 images 字段
+        if (Array.isArray(firstChoice.message.images)) {
+          if (logger) {
+            logger.debug('从 message.images 数组提取图片', { count: firstChoice.message.images.length })
+          }
+          return firstChoice.message.images
+        }
+      }
+    }
+    
+    // 检查响应根级别的其他可能字段
+    if (images.length === 0) {
+      // 检查 data 字段
+        if (response.data) {
+        if (Array.isArray(response.data)) {
+          const dataImages = response.data.filter((item: any) => 
+            item?.url || item?.image_url || (typeof item === 'string' && (item.startsWith('http') || item.startsWith('data:')))
+          ).map((item: any) => item?.url || item?.image_url || item)
+          if (dataImages.length > 0) {
+            if (logger) {
+              logger.debug('从 response.data 数组提取图片', { count: dataImages.length })
+            }
+            return dataImages
+          }
+        } else if (response.data.url || response.data.image_url) {
+          if (logger) {
+            logger.debug('从 response.data 提取图片')
+          }
+          images.push(response.data.url || response.data.image_url)
+        }
       }
       
-      // 检查是否有 data: URL
-      const dataUrlRegex = /(data:image\/[^;]+;base64,[^\s"')]+)/gi
-      let dataUrlMatch
-      while ((dataUrlMatch = dataUrlRegex.exec(contentText)) !== null) {
-        images.push(dataUrlMatch[1])
+      // 检查 result 字段
+      if (response.result) {
+        if (Array.isArray(response.result)) {
+          const resultImages = response.result.filter((item: any) => 
+            item?.url || item?.image_url || (typeof item === 'string' && (item.startsWith('http') || item.startsWith('data:')))
+          ).map((item: any) => item?.url || item?.image_url || item)
+          if (resultImages.length > 0) {
+            if (logger) {
+              logger.debug('从 response.result 数组提取图片', { count: resultImages.length })
+            }
+            return resultImages
+          }
+        } else if (typeof response.result === 'string' && (response.result.startsWith('http') || response.result.startsWith('data:'))) {
+          if (logger) {
+            logger.debug('从 response.result 提取图片')
+          }
+          images.push(response.result)
+        }
+      }
+    }
+    
+    if (images.length > 0) {
+      if (logger) {
+        logger.debug('成功提取图片', { count: images.length })
+      }
+    } else {
+      if (logger) {
+        logger.warn('未能从响应中提取图片', { 
+          responseStructure: {
+            hasChoices: !!response?.choices,
+            hasImages: !!response?.images,
+            hasImage: !!response?.image,
+            hasData: !!response?.data,
+            hasResult: !!response?.result,
+            keys: Object.keys(response || {})
+          }
+        })
       }
     }
     
     return images
   } catch (error) {
+    logger?.error('解析响应时出错', { error })
     return []
   }
 }
@@ -131,7 +248,9 @@ export class GptGodProvider implements ImageProvider {
       throw new Error('GPTGod 配置不完整，请检查 API Key')
     }
 
-    logger.debug('调用 GPTGod 图像编辑 API', { prompt, imageCount: urls.length, numImages })
+    if (this.config.logLevel === 'debug') {
+      logger.debug('调用 GPTGod 图像编辑 API', { prompt, imageCount: urls.length, numImages })
+    }
 
     const contentParts: any[] = [
       {
@@ -181,11 +300,98 @@ export class GptGodProvider implements ImageProvider {
       )
       
       logger.success('GPTGod 图像编辑 API 调用成功')
-      const images = parseGptGodResponse(response)
       
-      // 如果返回的图片数量不足，记录警告
+      // 检查响应中是否有错误信息
+      if (response?.choices?.length > 0) {
+        const firstChoice = response.choices[0]
+        const messageContent = firstChoice.message?.content
+        let errorMessage = ''
+        
+        // 提取错误消息
+        if (typeof messageContent === 'string') {
+          errorMessage = messageContent
+        } else if (Array.isArray(messageContent)) {
+          const textParts = messageContent
+            .filter((part: any) => part?.type === 'text' && part?.text)
+            .map((part: any) => part.text)
+            .join(' ')
+          errorMessage = textParts
+        } else if (messageContent?.text) {
+          errorMessage = messageContent.text
+        }
+        
+        // 检查是否是内容政策错误
+        if (errorMessage && (
+          errorMessage.includes('PROHIBITED_CONTENT') ||
+          errorMessage.includes('blocked by Google Gemini') ||
+          errorMessage.includes('prohibited under official usage policies') ||
+          errorMessage.toLowerCase().includes('content is prohibited')
+        )) {
+          logger.error('内容被 Google Gemini 政策拦截', { 
+            errorMessage: errorMessage.substring(0, 200),
+            finishReason: firstChoice.finish_reason
+          })
+          throw new Error('内容被安全策略拦截')
+        }
+        
+        // 检查其他错误消息
+        if (errorMessage && (
+          errorMessage.toLowerCase().includes('error') ||
+          errorMessage.toLowerCase().includes('failed') ||
+          errorMessage.toLowerCase().includes('blocked')
+        ) && !errorMessage.match(/https?:\/\//)) {
+          // 如果错误消息中没有URL（可能是图片URL），则认为是错误
+          logger.error('API 返回错误消息', { 
+            errorMessage: errorMessage.substring(0, 200),
+            finishReason: firstChoice.finish_reason
+          })
+          // 提取关键错误信息
+          const shortError = errorMessage.length > 50 ? errorMessage.substring(0, 50) + '...' : errorMessage
+          throw new Error(`处理失败：${shortError}`)
+        }
+      }
+      
+      // 添加调试日志，输出响应结构（仅在debug模式下）
+      if (this.config.logLevel === 'debug') {
+        logger.debug('GPTGod API 响应结构', { 
+          hasChoices: !!response?.choices,
+          choicesLength: response?.choices?.length,
+          hasImages: !!response?.images,
+          hasImage: !!response?.image,
+          responseKeys: Object.keys(response || {}),
+          firstChoiceContent: response?.choices?.[0]?.message?.content ? 
+            (typeof response.choices[0].message.content === 'string' ? 
+              response.choices[0].message.content.substring(0, 200) : 
+              JSON.stringify(response.choices[0].message.content).substring(0, 200)) : 
+            'none'
+        })
+      }
+      
+      const images = parseGptGodResponse(response, this.config.logLevel === 'debug' ? logger : null)
+      
+      // 如果返回的图片数量不足，记录警告和完整响应
       if (images.length < numImages) {
-        logger.warn('生成的图片数量不足', { requested: numImages, received: images.length })
+        const warnData: any = { 
+          requested: numImages, 
+          received: images.length
+        }
+        if (this.config.logLevel === 'debug') {
+          warnData.responsePreview = JSON.stringify(response).substring(0, 500)
+        }
+        logger.warn('生成的图片数量不足', warnData)
+        
+        // 如果一张图片都没有生成，且响应中有错误信息，抛出更明确的错误
+        if (images.length === 0 && response?.choices?.[0]?.message?.content) {
+          const content = response.choices[0].message.content
+          const contentText = typeof content === 'string' ? content : 
+            (Array.isArray(content) ? content.map((p: any) => p?.text || '').join(' ') : '')
+          
+          if (contentText && !contentText.match(/https?:\/\//)) {
+            // 如果内容中没有URL，可能是错误消息
+            const shortError = contentText.length > 50 ? contentText.substring(0, 50) + '...' : contentText
+            throw new Error(`生成失败：${shortError}`)
+          }
+        }
       }
       
       return images

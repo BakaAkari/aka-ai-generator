@@ -13,6 +13,7 @@ export interface ImageProvider {
 
 export interface ProviderConfig {
   apiTimeout: number
+  logLevel: 'info' | 'debug'
   logger: any
   ctx: any
 }

@@ -11,6 +11,7 @@ export interface ProviderFactoryConfig {
   gptgodApiKey: string
   gptgodModelId: string
   apiTimeout: number
+  logLevel: 'info' | 'debug'
   logger: any
   ctx: any
 }
@@ -25,6 +26,7 @@ export function createImageProvider(config: ProviderFactoryConfig): ImageProvide
         apiKey: config.yunwuApiKey,
         modelId: config.yunwuModelId,
         apiTimeout: config.apiTimeout,
+        logLevel: config.logLevel,
         logger: config.logger,
         ctx: config.ctx
       })
@@ -34,6 +36,7 @@ export function createImageProvider(config: ProviderFactoryConfig): ImageProvide
         apiKey: config.gptgodApiKey,
         modelId: config.gptgodModelId,
         apiTimeout: config.apiTimeout,
+        logLevel: config.logLevel,
         logger: config.logger,
         ctx: config.ctx
       })

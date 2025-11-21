@@ -1,7 +1,7 @@
 import { Context, Schema, h, Session } from 'koishi'
 import { existsSync, mkdirSync, promises as fs } from 'fs'
 import { join } from 'path'
-import { createImageProvider, ImageProvider } from './providers'
+import { createImageProvider, ImageProvider as IImageProvider, ProviderType } from './providers'
 
 export const name = 'aka-ai-generator'
 
@@ -59,6 +59,7 @@ export interface Config {
   rateLimitMax: number
   adminUsers: string[]
   styles: StyleConfig[]
+  logLevel: 'info' | 'debug'
 }
 
 // 充值记录接口
@@ -95,7 +96,7 @@ export const Config: Schema<Config> = Schema.intersect([
       Schema.const('yunwu').description('云雾 Gemini 服务'),
       Schema.const('gptgod').description('GPTGod 服务'),
     ] as const)
-      .default('yunwu')
+      .default('yunwu' as ImageProvider)
       .description('图像生成供应商'),
     yunwuApiKey: Schema.string().description('云雾API密钥').role('secret').required(),
     yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
@@ -133,7 +134,15 @@ export const Config: Schema<Config> = Schema.intersect([
     // 管理员设置
     adminUsers: Schema.array(Schema.string())
       .default([])
-      .description('管理员用户ID列表（不受每日使用限制）')
+      .description('管理员用户ID列表（不受每日使用限制）'),
+    
+    // 日志级别设置
+    logLevel: Schema.union([
+      Schema.const('info').description('普通信息'),
+      Schema.const('debug').description('完整的debug信息'),
+    ] as const)
+      .default('info' as const)
+      .description('日志输出详细程度')
   }),
   
   // 自定义风格命令配置
@@ -178,13 +187,14 @@ export function apply(ctx: Context, config: Config) {
   const rateLimitMap = new Map<string, number[]>()  // userId -> timestamps
   
   // 创建图像生成供应商
-  const imageProvider: ImageProvider = createImageProvider({
-    provider: config.provider,
+  const imageProvider: IImageProvider = createImageProvider({
+    provider: config.provider as ProviderType,
     yunwuApiKey: config.yunwuApiKey,
     yunwuModelId: config.yunwuModelId,
     gptgodApiKey: config.gptgodApiKey,
     gptgodModelId: config.gptgodModelId,
     apiTimeout: config.apiTimeout,
+    logLevel: config.logLevel,
     logger,
     ctx
   })
@@ -506,7 +516,9 @@ export function apply(ctx: Context, config: Config) {
     if (img) {
       url = img.attrs?.src || null
       if (url) {
-        logger.debug('从命令参数获取图片', { url })
+        if (config.logLevel === 'debug') {
+          logger.debug('从命令参数获取图片', { url })
+        }
         return url
       }
     }
@@ -522,7 +534,9 @@ export function apply(ctx: Context, config: Config) {
           return null
         }
         url = images[0].attrs.src
-        logger.debug('从引用消息获取图片', { url })
+        if (config.logLevel === 'debug') {
+          logger.debug('从引用消息获取图片', { url })
+        }
         return url
       }
     }
@@ -552,7 +566,9 @@ export function apply(ctx: Context, config: Config) {
     }
     
     url = images[0].attrs.src
-    logger.debug('从用户输入获取图片', { url })
+    if (config.logLevel === 'debug') {
+      logger.debug('从用户输入获取图片', { url })
+    }
     return url
   }
 
@@ -693,7 +709,7 @@ export function apply(ctx: Context, config: Config) {
           }
           
           // 等待用户发送图片和prompt
-          await session.send('请发送一张图片和prompt，支持两种方式：\n1. 同时发送：[图片] + prompt描述\n2. 分步发送：先发送一张图片，再发送prompt文字\n\n例如：[图片] 让这张图片变成油画风格\n\n注意：本功能仅支持处理一张图片，多张图片请使用"合成图像"命令')
+          await session.send('图片+描述\n\n多张图片使用"合成图像"指令')
           
           const collectedImages: string[] = []
           let prompt = ''
@@ -849,7 +865,7 @@ export function apply(ctx: Context, config: Config) {
           }
           
           // 等待用户发送多张图片和prompt
-          await session.send('请发送多张图片和prompt，支持两种方式：\n1. 同时发送：[图片1] [图片2]... + prompt描述\n2. 分步发送：先发送多张图片，再发送prompt文字\n\n例如：[图片1] [图片2] 将这两张图片合成一张')
+          await session.send('多张图片+描述')
           
           const collectedImages: string[] = []
           let prompt = ''
@@ -1217,6 +1233,6 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  const providerLabel = config.provider === 'gptgod' ? 'GPTGod' : '云雾 Gemini 2.5 Flash Image'
+  const providerLabel = (config.provider as ProviderType) === 'gptgod' ? 'GPTGod' : '云雾 Gemini 2.5 Flash Image'
   logger.info(`aka-ai-generator 插件已启动 (${providerLabel})`)
 }
