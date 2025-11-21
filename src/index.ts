@@ -169,15 +169,27 @@ export const Config: Schema<Config> = Schema.intersect([
         enabled: true
       },
       {
-        commandName: '角色设定',
-        commandDescription: '生成人物角色设定',
-        prompt: '为我生成人物的角色设定（Character Design）, 比例设定（不同身高对比、头身比等）, 三视图（正面、侧面、背面）, 表情设定（Expression Sheet） , 动作设定（Pose Sheet） → 各种常见姿势, 服装设定（Costume Design）',
+        commandName: '生成设定',
+        commandDescription: '智能识别主体类型并生成相应的设定方案',
+        prompt: '请根据用户提供的图片，智能识别图像主体的类型（人物角色、道具物品、载具、建筑、生物等），然后自动生成相应的完整设定方案。要求：1. 首先分析并识别主体的类型和特征；2. 严格遵循原图的艺术风格和细节度，保持与原图一致的视觉风格（如二次元、写实、手绘、3D渲染等）和细节表现水平；3. 去除原图中包含的所有光照信息，包括阴影、高光、明暗对比等，使用均匀、无方向性的平光或标准设定图光照，确保设定图呈现清晰、无光影干扰的展示效果；4. 如果主体是人物角色，生成角色设定（Character Design），包括：比例设定（不同身高对比、头身比等）、三视图（正面、侧面、背面）、表情设定（Expression Sheet）、动作设定（Pose Sheet - 各种常见姿势）、服装设定（Costume Design）；5. 如果主体是道具、武器、载具或物品，生成道具设定（Prop/Item Design），包括：功能结构图（Functional Components）、状态变化展示（State Variations）、细节特写（Detail Close-ups）；6. 如果主体是建筑或场景，生成建筑/场景设定，包括：结构图、不同角度视图、细节展示；7. 如果主体是生物（非人类），生成生物设定，包括：形态特征、不同姿态、细节展示；8. 根据主体的实际类型，智能选择最合适的设定内容，确保生成的设定方案完整、专业且符合该类型的设计规范。',
         enabled: true
       },
       {
-        commandName: '道具设定',
-        commandDescription: '生成游戏道具设定（武器、载具等）',
-        prompt: '为我生成游戏道具的完整设定（Prop/Item Design），包含以下内容：功能结构图（Functional Components）、状态变化展示（State Variations）、细节特写（Detail Close-ups）',
+        commandName: '改姿势',
+        commandDescription: '改变图像主体的姿势造型，保持主体细节和风格不变',
+        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征、服装细节、艺术风格和整体氛围不变的前提下，生成一个新的姿势造型。新姿势应该更加帅气、可爱、有张力或符合主体内容的动态感，展现出更好的视觉表现力。要求：1. 完全保持主体的面部特征、发型、服装、配饰等所有细节不变；2. 完全保持原有的艺术风格（如二次元、写实、手绘等）不变；3. 只改变身体的姿势、动作和姿态，让主体看起来更有活力和表现力；4. 姿势应该自然、协调，符合主体的身份和性格特征；5. 保持背景环境的基本风格不变（可以适当调整视角或构图）。',
+        enabled: true
+      },
+      {
+        commandName: '修改设计',
+        commandDescription: '修改图像主体的结构设计，保持原有设计语言和风格',
+        prompt: '请根据用户提供的图片，在严格保持原有设计语言、视觉风格、功能特征和整体主题不变的前提下，对图像主体的结构设计进行修改。要求：1. 完全保持原有的设计语言和视觉风格（如现代简约、复古、科幻、奇幻等）不变；2. 保持主体的核心功能特征和身份定位不变；3. 可以合理且美观地添加、删改或修改结构元素（如装饰细节、功能组件、线条轮廓、比例关系等），使设计更加完善和美观；4. 所有修改必须符合原有主题的视觉风格，增强设计美感而不破坏原有设计语言；5. 修改后的设计应该更加协调、统一，具有更好的视觉层次和设计完整性；6. 保持色彩方案、材质质感和整体氛围的一致性。',
+        enabled: true
+      },
+      {
+        commandName: '变像素',
+        commandDescription: '将图像主体转换为8位像素艺术风格',
+        prompt: '请根据用户提供的图片，将图像主体转换为经典的8位像素艺术风格。要求：1. 完全保持主体的身份、外观特征和核心识别元素不变，确保转换后仍然清晰可识别；2. 采用极简的8位像素风格，使用有限的复古调色板（通常为16-256色），营造经典街机游戏的美学氛围；3. 所有细节都进行像素化处理，使用清晰的像素块和锐利的边缘，避免平滑渐变；4. 采用干净的块状形式，保持简单、标志性的设计，突出主体的核心特征；5. 背景可以简化为纯色背景（如纯白或纯黑），或者保持简单的像素化背景，确保主体突出；6. 整体风格应具有强烈的复古游戏感，让人联想到经典街机游戏和早期电子游戏的视觉美学；7. 保持主体的比例和基本结构，但用像素块重新诠释所有细节。',
         enabled: true
       }
     ]).description('自定义风格命令配置')
@@ -220,9 +232,6 @@ export function apply(ctx: Context, config: Config) {
       ...getStyleCommands(),
       { name: COMMANDS.GENERATE_IMAGE, description: '使用自定义prompt进行图像处理' },
       { name: COMMANDS.COMPOSE_IMAGE, description: '合成多张图片，使用自定义prompt控制合成效果' },
-      { name: COMMANDS.CHANGE_POSE, description: '改变图像主体的姿势造型，保持主体细节和风格不变' },
-      { name: COMMANDS.OPTIMIZE_DESIGN, description: '修改图像主体的结构设计，保持原有设计语言和风格' },
-      { name: COMMANDS.PIXELATE, description: '将图像主体转换为8位像素艺术风格' },
       { name: COMMANDS.QUERY_QUOTA, description: '查询用户额度信息' }
     ],
     // 管理员指令
@@ -1015,60 +1024,6 @@ export function apply(ctx: Context, config: Config) {
         logger.error('图片合成超时或失败', { userId, error })
         return error.message === '命令执行超时' ? '图片合成超时，请重试' : '图片合成失败，请稍后重试'
       })
-    })
-
-  // 改姿势命令
-  ctx.command(`${COMMANDS.CHANGE_POSE} [img:text]`, '改变图像主体的姿势造型，保持主体细节和风格不变')
-    .option('num', '-n <num:number> 生成图片数量 (1-4)')
-    .action(async ({ session, options }, img) => {
-      if (!session?.userId) return '会话无效'
-      
-      // 检查每日调用限制
-      const limitCheck = await checkDailyLimit(session.userId)
-      if (!limitCheck.allowed) {
-        return limitCheck.message
-      }
-      
-      // 改姿势的prompt，强调保持主体细节和风格，只改变姿势
-      const posePrompt = '请根据用户提供的图片，在严格保持主体身份、外观特征、服装细节、艺术风格和整体氛围不变的前提下，生成一个新的姿势造型。新姿势应该更加帅气、可爱、有张力或符合主体内容的动态感，展现出更好的视觉表现力。要求：1. 完全保持主体的面部特征、发型、服装、配饰等所有细节不变；2. 完全保持原有的艺术风格（如二次元、写实、手绘等）不变；3. 只改变身体的姿势、动作和姿态，让主体看起来更有活力和表现力；4. 姿势应该自然、协调，符合主体的身份和性格特征；5. 保持背景环境的基本风格不变（可以适当调整视角或构图）。'
-      
-      return processImageWithTimeout(session, img, posePrompt, COMMANDS.CHANGE_POSE, options?.num)
-    })
-
-  // 修改设计命令
-  ctx.command(`${COMMANDS.OPTIMIZE_DESIGN} [img:text]`, '修改图像主体的结构设计，保持原有设计语言和风格')
-    .option('num', '-n <num:number> 生成图片数量 (1-4)')
-    .action(async ({ session, options }, img) => {
-      if (!session?.userId) return '会话无效'
-      
-      // 检查每日调用限制
-      const limitCheck = await checkDailyLimit(session.userId)
-      if (!limitCheck.allowed) {
-        return limitCheck.message
-      }
-      
-      // 修改设计的prompt，强调保持原有设计语言，合理修改结构设计
-      const designPrompt = '请根据用户提供的图片，在严格保持原有设计语言、视觉风格、功能特征和整体主题不变的前提下，对图像主体的结构设计进行修改。要求：1. 完全保持原有的设计语言和视觉风格（如现代简约、复古、科幻、奇幻等）不变；2. 保持主体的核心功能特征和身份定位不变；3. 可以合理且美观地添加、删改或修改结构元素（如装饰细节、功能组件、线条轮廓、比例关系等），使设计更加完善和美观；4. 所有修改必须符合原有主题的视觉风格，增强设计美感而不破坏原有设计语言；5. 修改后的设计应该更加协调、统一，具有更好的视觉层次和设计完整性；6. 保持色彩方案、材质质感和整体氛围的一致性。'
-      
-      return processImageWithTimeout(session, img, designPrompt, COMMANDS.OPTIMIZE_DESIGN, options?.num)
-    })
-
-  // 变像素命令
-  ctx.command(`${COMMANDS.PIXELATE} [img:text]`, '将图像主体转换为8位像素艺术风格')
-    .option('num', '-n <num:number> 生成图片数量 (1-4)')
-    .action(async ({ session, options }, img) => {
-      if (!session?.userId) return '会话无效'
-      
-      // 检查每日调用限制
-      const limitCheck = await checkDailyLimit(session.userId)
-      if (!limitCheck.allowed) {
-        return limitCheck.message
-      }
-      
-      // 变像素的prompt，将主体转换为8位像素艺术风格
-      const pixelPrompt = '请根据用户提供的图片，将图像主体转换为经典的8位像素艺术风格。要求：1. 完全保持主体的身份、外观特征和核心识别元素不变，确保转换后仍然清晰可识别；2. 采用极简的8位像素风格，使用有限的复古调色板（通常为16-256色），营造经典街机游戏的美学氛围；3. 所有细节都进行像素化处理，使用清晰的像素块和锐利的边缘，避免平滑渐变；4. 采用干净的块状形式，保持简单、标志性的设计，突出主体的核心特征；5. 背景可以简化为纯色背景（如纯白或纯黑），或者保持简单的像素化背景，确保主体突出；6. 整体风格应具有强烈的复古游戏感，让人联想到经典街机游戏和早期电子游戏的视觉美学；7. 保持主体的比例和基本结构，但用像素块重新诠释所有细节。'
-      
-      return processImageWithTimeout(session, img, pixelPrompt, COMMANDS.PIXELATE, options?.num)
     })
 
   // 充值管理命令
