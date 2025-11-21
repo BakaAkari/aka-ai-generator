@@ -7,6 +7,9 @@ export interface GptGodConfig extends ProviderConfig {
   modelId: string
 }
 
+const HTTP_URL_REGEX = /^https?:\/\//i
+const DATA_URL_REGEX = /^data:image\//i
+
 /**
  * 下载图片并转换为 Base64
  */
@@ -49,6 +52,47 @@ async function downloadImageAsBase64(
   } catch (error) {
     logger.error('下载图片失败', { url, error })
     throw new Error('下载图片失败，请检查图片链接是否有效')
+  }
+}
+
+function isHttpImage(url: string): boolean {
+  return HTTP_URL_REGEX.test(url)
+}
+
+function isDataImage(url: string): boolean {
+  return DATA_URL_REGEX.test(url)
+}
+
+async function buildImageContentPart(
+  ctx: any,
+  url: string,
+  timeout: number,
+  logger: any
+): Promise<{ type: 'image_url', image_url: { url: string } }> {
+  if (!url) {
+    throw new Error('下载图片失败，请检查图片链接是否有效')
+  }
+
+  if (isDataImage(url)) {
+    return {
+      type: 'image_url',
+      image_url: { url }
+    }
+  }
+
+  if (isHttpImage(url)) {
+    return {
+      type: 'image_url',
+      image_url: { url }
+    }
+  }
+
+  const { data, mimeType } = await downloadImageAsBase64(ctx, url, timeout, logger)
+  return {
+    type: 'image_url',
+    image_url: {
+      url: `data:${mimeType};base64,${data}`
+    }
   }
 }
 
@@ -260,18 +304,13 @@ export class GptGodProvider implements ImageProvider {
     ]
 
     for (const url of urls) {
-      const { data, mimeType } = await downloadImageAsBase64(
+      const imagePart = await buildImageContentPart(
         ctx,
         url,
         this.config.apiTimeout,
         logger
       )
-      contentParts.push({
-        type: 'image_url',
-        image_url: {
-          url: `data:${mimeType};base64,${data}`
-        }
-      })
+      contentParts.push(imagePart)
     }
 
     const requestData = {
@@ -411,6 +450,11 @@ export class GptGodProvider implements ImageProvider {
         status: error?.response?.status,
         data: error?.response?.data
       })
+      
+      if (error?.message?.includes('fetch') && error?.message?.includes(GPTGOD_DEFAULT_API_URL)) {
+        throw new Error('图像处理失败：无法连接 GPTGod API 服务器，请稍后重试')
+      }
+      
       throw new Error('图像处理API调用失败')
     }
   }

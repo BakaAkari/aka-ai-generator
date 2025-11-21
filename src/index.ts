@@ -22,9 +22,7 @@ export type ImageProvider = 'yunwu' | 'gptgod'
 
 export interface StyleConfig {
   commandName: string
-  commandDescription: string
   prompt: string
-  enabled: boolean
 }
 
 // 用户数据接口
@@ -152,45 +150,31 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     styles: Schema.array(Schema.object({
       commandName: Schema.string().required().description('命令名称（不含前缀斜杠）'),
-      commandDescription: Schema.string().required().description('命令描述'),
-      prompt: Schema.string().role('textarea', { rows: 4 }).required().description('生成 prompt'),
-      enabled: Schema.boolean().default(true).description('是否启用此命令')
+      prompt: Schema.string().role('textarea', { rows: 4 }).required().description('生成 prompt')
     })).role('table').default([
       {
         commandName: '变手办',
-        commandDescription: '转换为手办风格',
-        prompt: '将这张照片变成手办模型。在它后面放置一个印有图像主体的盒子，桌子上有一台电脑显示Blender建模过程。在盒子前面添加一个圆形塑料底座，角色手办站在上面。如果可能的话，将场景设置在室内',
-        enabled: true
+        prompt: '将这张照片变成手办模型。在它后面放置一个印有图像主体的盒子，桌子上有一台电脑显示Blender建模过程。在盒子前面添加一个圆形塑料底座，角色手办站在上面。如果可能的话，将场景设置在室内'
       },
       {
         commandName: '变写实',
-        commandDescription: '以真实摄影风格重建主体',
-        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征与姿态不变的前提下，生成一张照片级真实感的超写实摄影作品。要求：1. 采用专业相机拍摄（如佳能EOS R5），使用85mm f/1.4人像镜头，呈现柯达Portra 400胶片质感，8K超高清画质，HDR高动态范围，电影级打光效果；2. 画面应具有照片级真实感、超现实主义风格和高细节表现，确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界；3. 使用自然光影营造真实氛围，呈现raw and natural的原始自然感，具有authentic film snapshot的真实胶片质感，使用strong contrast between light and dark营造强烈明暗对比，产生deep shadows深阴影效果；4. 整体需具备tactile feel触感质感和simulated texture模拟纹理细节，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素；5. 整体效果需像专业摄影棚拍摄的真实照片，具有电影级画质；6. 如果主体是人物脸部，脸部生成效果应参考欧美混血白人精致美丽帅气英俊的外观特征进行生成，保持精致立体的五官轮廓、健康光泽的肌肤质感、优雅的气质和自然的表情，确保面部特征协调美观。',
-        enabled: true
+        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征与姿态不变的前提下，生成一张照片级真实感的超写实摄影作品。要求：1. 采用专业相机拍摄（如佳能EOS R5），使用85mm f/1.4人像镜头，呈现柯达Portra 400胶片质感，8K超高清画质，HDR高动态范围，电影级打光效果；2. 画面应具有照片级真实感、超现实主义风格和高细节表现，确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界；3. 使用自然光影营造真实氛围，呈现raw and natural的原始自然感，具有authentic film snapshot的真实胶片质感；4. 整体需具备tactile feel触感质感和simulated texture模拟纹理细节，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素；5. 整体效果需像专业摄影棚拍摄的真实照片，具有电影级画质；6. 如果主体是人物脸部，脸部生成效果应参考欧美混血白人精致美丽帅气英俊的外观特征进行生成，保持精致立体的五官轮廓、健康光泽的肌肤质感、优雅的气质和自然的表情，确保面部特征协调美观。'
       },
       {
         commandName: '生成设定',
-        commandDescription: '智能识别主体类型并生成相应的设定方案',
-        prompt: '请根据用户提供的图片，智能识别图像主体的类型（人物角色、道具物品、载具、建筑、生物等），然后自动生成相应的完整设定方案。要求：1. 首先分析并识别主体的类型和特征；2. 严格遵循原图的艺术风格和细节度，保持与原图一致的视觉风格（如二次元、写实、手绘、3D渲染等）和细节表现水平；3. 去除原图中包含的所有光照信息，包括阴影、高光、明暗对比等，使用均匀、无方向性的平光或标准设定图光照，确保设定图呈现清晰、无光影干扰的展示效果；4. 如果主体是人物角色，生成角色设定（Character Design），包括：比例设定（不同身高对比、头身比等）、三视图（正面、侧面、背面）、表情设定（Expression Sheet）、动作设定（Pose Sheet - 各种常见姿势）、服装设定（Costume Design）；5. 如果主体是道具、武器、载具或物品，生成道具设定（Prop/Item Design），包括：功能结构图（Functional Components）、状态变化展示（State Variations）、细节特写（Detail Close-ups）；6. 如果主体是建筑或场景，生成建筑/场景设定，包括：结构图、不同角度视图、细节展示；7. 如果主体是生物（非人类），生成生物设定，包括：形态特征、不同姿态、细节展示；8. 根据主体的实际类型，智能选择最合适的设定内容，确保生成的设定方案完整、专业且符合该类型的设计规范。',
-        enabled: true
+        prompt: '请根据用户提供的图片，智能识别图像主体的类型（人物角色、道具物品、载具、建筑、生物等），然后自动生成相应的完整设定方案。要求：1. 首先分析并识别主体的类型和特征；2. 严格遵循原图的艺术风格和细节度，保持与原图一致的视觉风格（如二次元、写实、手绘、3D渲染等）和细节表现水平；3. 去除原图中包含的所有光照信息，包括阴影、高光、明暗对比等，使用均匀、无方向性的平光或标准设定图光照，确保设定图呈现清晰、无光影干扰的展示效果；4. 如果主体是人物角色，生成角色设定（Character Design），包括：比例设定（不同身高对比、头身比等）、三视图（正面、侧面、背面）、表情设定（Expression Sheet）、动作设定（Pose Sheet - 各种常见姿势）、服装设定（Costume Design）；5. 如果主体是道具、武器、载具或物品，生成道具设定（Prop/Item Design），包括：功能结构图（Functional Components）、状态变化展示（State Variations）、细节特写（Detail Close-ups）；6. 如果主体是建筑或场景，生成建筑/场景设定，包括：结构图、不同角度视图、细节展示；7. 如果主体是生物（非人类），生成生物设定，包括：形态特征、不同姿态、细节展示；8. 根据主体的实际类型，智能选择最合适的设定内容，确保生成的设定方案完整、专业且符合该类型的设计规范。'
       },
       {
         commandName: '改姿势',
-        commandDescription: '改变图像主体的姿势造型，保持主体细节和风格不变',
-        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征、服装细节、艺术风格和整体氛围不变的前提下，生成一个新的姿势造型。新姿势应该更加帅气、可爱、有张力或符合主体内容的动态感，展现出更好的视觉表现力。要求：1. 完全保持主体的面部特征、发型、服装、配饰等所有细节不变；2. 完全保持原有的艺术风格（如二次元、写实、手绘等）不变；3. 只改变身体的姿势、动作和姿态，让主体看起来更有活力和表现力；4. 姿势应该自然、协调，符合主体的身份和性格特征；5. 保持背景环境的基本风格不变（可以适当调整视角或构图）。',
-        enabled: true
+        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征、服装细节、艺术风格和整体氛围不变的前提下，生成一个新的姿势造型。新姿势应该更加帅气、可爱、有张力或符合主体内容的动态感，展现出更好的视觉表现力。要求：1. 完全保持主体的面部特征、发型、服装、配饰等所有细节不变；2. 完全保持原有的艺术风格（如二次元、写实、手绘等）不变；3. 只改变身体的姿势、动作和姿态，让主体看起来更有活力和表现力；4. 姿势应该自然、协调，符合主体的身份和性格特征；5. 保持背景环境的基本风格不变（可以适当调整视角或构图）。'
       },
       {
         commandName: '修改设计',
-        commandDescription: '修改图像主体的结构设计，保持原有设计语言和风格',
-        prompt: '请根据用户提供的图片，在严格保持原有设计语言、视觉风格、功能特征和整体主题不变的前提下，对图像主体的结构设计进行修改。要求：1. 完全保持原有的设计语言和视觉风格（如现代简约、复古、科幻、奇幻等）不变；2. 保持主体的核心功能特征和身份定位不变；3. 可以合理且美观地添加、删改或修改结构元素（如装饰细节、功能组件、线条轮廓、比例关系等），使设计更加完善和美观；4. 所有修改必须符合原有主题的视觉风格，增强设计美感而不破坏原有设计语言；5. 修改后的设计应该更加协调、统一，具有更好的视觉层次和设计完整性；6. 保持色彩方案、材质质感和整体氛围的一致性。',
-        enabled: true
+        prompt: '请根据用户提供的图片，在严格保持原有设计语言、视觉风格、功能特征和整体主题不变的前提下，对图像主体的结构设计进行修改。要求：1. 完全保持原有的设计语言和视觉风格（如现代简约、复古、科幻、奇幻等）不变；2. 保持主体的核心功能特征和身份定位不变；3. 可以合理且美观地添加、删改或修改结构元素（如装饰细节、功能组件、线条轮廓、比例关系等），使设计更加完善和美观；4. 所有修改必须符合原有主题的视觉风格，增强设计美感而不破坏原有设计语言；5. 修改后的设计应该更加协调、统一，具有更好的视觉层次和设计完整性；6. 保持色彩方案、材质质感和整体氛围的一致性。'
       },
       {
         commandName: '变像素',
-        commandDescription: '将图像主体转换为8位像素艺术风格',
-        prompt: '请根据用户提供的图片，将图像主体转换为经典的8位像素艺术风格。要求：1. 完全保持主体的身份、外观特征和核心识别元素不变，确保转换后仍然清晰可识别；2. 采用极简的8位像素风格，使用有限的复古调色板（通常为16-256色），营造经典街机游戏的美学氛围；3. 所有细节都进行像素化处理，使用清晰的像素块和锐利的边缘，避免平滑渐变；4. 采用干净的块状形式，保持简单、标志性的设计，突出主体的核心特征；5. 背景可以简化为纯色背景（如纯白或纯黑），或者保持简单的像素化背景，确保主体突出；6. 整体风格应具有强烈的复古游戏感，让人联想到经典街机游戏和早期电子游戏的视觉美学；7. 保持主体的比例和基本结构，但用像素块重新诠释所有细节。',
-        enabled: true
+        prompt: '请根据用户提供的图片，将图像主体转换为经典的8位像素艺术风格。要求：1. 完全保持主体的身份、外观特征和核心识别元素不变，确保转换后仍然清晰可识别；2. 采用极简的8位像素风格，使用有限的复古调色板（通常为16-256色），营造经典街机游戏的美学氛围；3. 所有细节都进行像素化处理，使用清晰的像素块和锐利的边缘，避免平滑渐变；4. 采用干净的块状形式，保持简单、标志性的设计，突出主体的核心特征；5. 背景可以简化为纯色背景（如纯白或纯黑），或者保持简单的像素化背景，确保主体突出；6. 整体风格应具有强烈的复古游戏感，让人联想到经典街机游戏和早期电子游戏的视觉美学；7. 保持主体的比例和基本结构，但用像素块重新诠释所有细节。'
       }
     ]).description('自定义风格命令配置')
   })
@@ -218,10 +202,10 @@ export function apply(ctx: Context, config: Config) {
   function getStyleCommands() {
     if (!config.styles || !Array.isArray(config.styles)) return []
     return config.styles
-      .filter(style => style.enabled && style.commandName && style.prompt)
+      .filter(style => style.commandName && style.prompt)
       .map(style => ({
         name: style.commandName,
-        description: style.commandDescription || '图像风格转换'
+        description: '图像风格转换'
       }))
   }
 
@@ -690,8 +674,8 @@ export function apply(ctx: Context, config: Config) {
   // 动态注册风格命令
   if (config.styles && Array.isArray(config.styles)) {
     for (const style of config.styles) {
-      if (style.enabled && style.commandName && style.prompt) {
-        ctx.command(`${style.commandName} [img:text]`, style.commandDescription || '图像风格转换')
+      if (style.commandName && style.prompt) {
+        ctx.command(`${style.commandName} [img:text]`, '图像风格转换')
           .option('num', '-n <num:number> 生成图片数量 (1-4)')
           .action(async ({ session, options }, img) => {
             if (!session?.userId) return '会话无效'
