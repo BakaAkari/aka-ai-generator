@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-aka-ai-generator",
   "description": "自用AI生成插件(GPTGod & Yunwu)",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [

@@ -11,6 +11,7 @@ const COMMANDS = {
   COMPOSE_IMAGE: '合成图像',
   CHANGE_POSE: '改姿势',
   OPTIMIZE_DESIGN: '修改设计',
+  PIXELATE: '变像素',
   QUERY_QUOTA: '图像额度',
   RECHARGE: '图像充值',
   RECHARGE_HISTORY: '图像充值记录',
@@ -164,7 +165,7 @@ export const Config: Schema<Config> = Schema.intersect([
       {
         commandName: '变写实',
         commandDescription: '以真实摄影风格重建主体',
-        prompt: '请根据用户提供的图片，在保持主体身份、外观与姿态的前提下生成一张超写实的摄影作品。采用Ultra-realistic 3D rendered风格，确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界。画面应呈现raw and natural的原始自然感，具有authentic film snapshot的真实胶片质感。使用strong contrast between light and dark营造强烈明暗对比，产生deep shadows深阴影效果。整体需具备tactile feel触感质感和simulated texture模拟纹理细节，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素，整体效果需像专业摄影棚拍摄的真实照片。',
+        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征与姿态不变的前提下，生成一张照片级真实感的超写实摄影作品。要求：1. 采用专业相机拍摄（如佳能EOS R5），使用85mm f/1.4人像镜头，呈现柯达Portra 400胶片质感，8K超高清画质，HDR高动态范围，电影级打光效果；2. 画面应具有照片级真实感、超现实主义风格和高细节表现，确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界；3. 使用自然光影营造真实氛围，呈现raw and natural的原始自然感，具有authentic film snapshot的真实胶片质感，使用strong contrast between light and dark营造强烈明暗对比，产生deep shadows深阴影效果；4. 整体需具备tactile feel触感质感和simulated texture模拟纹理细节，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素；5. 整体效果需像专业摄影棚拍摄的真实照片，具有电影级画质；6. 如果主体是人物脸部，脸部生成效果应参考欧美混血白人精致美丽帅气英俊的外观特征进行生成，保持精致立体的五官轮廓、健康光泽的肌肤质感、优雅的气质和自然的表情，确保面部特征协调美观。',
         enabled: true
       },
       {
@@ -221,6 +222,7 @@ export function apply(ctx: Context, config: Config) {
       { name: COMMANDS.COMPOSE_IMAGE, description: '合成多张图片，使用自定义prompt控制合成效果' },
       { name: COMMANDS.CHANGE_POSE, description: '改变图像主体的姿势造型，保持主体细节和风格不变' },
       { name: COMMANDS.OPTIMIZE_DESIGN, description: '修改图像主体的结构设计，保持原有设计语言和风格' },
+      { name: COMMANDS.PIXELATE, description: '将图像主体转换为8位像素艺术风格' },
       { name: COMMANDS.QUERY_QUOTA, description: '查询用户额度信息' }
     ],
     // 管理员指令
@@ -722,7 +724,7 @@ export function apply(ctx: Context, config: Config) {
           }
           
           // 等待用户发送图片和prompt
-          await session.send('图片+描述\n\n多张图片使用"合成图像"指令')
+          await session.send('图片+描述')
           
           const collectedImages: string[] = []
           let prompt = ''
@@ -762,7 +764,7 @@ export function apply(ctx: Context, config: Config) {
               }
               
               // 只有图片，继续等待
-              await session.send('已收到图片，请发送 prompt 描述文字')
+              await session.send('请发送描述')
               continue
             }
             
@@ -917,7 +919,7 @@ export function apply(ctx: Context, config: Config) {
               }
               
               // 只有图片，继续等待
-              await session.send(`已收到 ${collectedImages.length} 张图片，请继续发送图片或发送 prompt 文字`)
+              await session.send(`已收到 ${collectedImages.length} 张图片，继续发送或输入描述`)
               continue
             }
             
@@ -1051,6 +1053,24 @@ export function apply(ctx: Context, config: Config) {
       return processImageWithTimeout(session, img, designPrompt, COMMANDS.OPTIMIZE_DESIGN, options?.num)
     })
 
+  // 变像素命令
+  ctx.command(`${COMMANDS.PIXELATE} [img:text]`, '将图像主体转换为8位像素艺术风格')
+    .option('num', '-n <num:number> 生成图片数量 (1-4)')
+    .action(async ({ session, options }, img) => {
+      if (!session?.userId) return '会话无效'
+      
+      // 检查每日调用限制
+      const limitCheck = await checkDailyLimit(session.userId)
+      if (!limitCheck.allowed) {
+        return limitCheck.message
+      }
+      
+      // 变像素的prompt，将主体转换为8位像素艺术风格
+      const pixelPrompt = '请根据用户提供的图片，将图像主体转换为经典的8位像素艺术风格。要求：1. 完全保持主体的身份、外观特征和核心识别元素不变，确保转换后仍然清晰可识别；2. 采用极简的8位像素风格，使用有限的复古调色板（通常为16-256色），营造经典街机游戏的美学氛围；3. 所有细节都进行像素化处理，使用清晰的像素块和锐利的边缘，避免平滑渐变；4. 采用干净的块状形式，保持简单、标志性的设计，突出主体的核心特征；5. 背景可以简化为纯色背景（如纯白或纯黑），或者保持简单的像素化背景，确保主体突出；6. 整体风格应具有强烈的复古游戏感，让人联想到经典街机游戏和早期电子游戏的视觉美学；7. 保持主体的比例和基本结构，但用像素块重新诠释所有细节。'
+      
+      return processImageWithTimeout(session, img, pixelPrompt, COMMANDS.PIXELATE, options?.num)
+    })
+
   // 充值管理命令
   ctx.command(`${COMMANDS.RECHARGE} [content:text]`, '为用户充值次数（仅管理员）')
     .action(async ({ session }, content) => {
@@ -1062,7 +1082,7 @@ export function apply(ctx: Context, config: Config) {
       }
       
       // 获取要解析的内容
-      const inputContent = content || await getPromptInput(session, '请输入充值信息，格式：\n@用户1 @用户2 充值次数 [备注]\n\n例如：\n@难捅一号 10 测试充值')
+      const inputContent = content || await getPromptInput(session, '请输入充值信息，格式：\n@用户1 @用户2 充值次数 [备注]')
       if (!inputContent) return '输入超时或无效'
       
       // 解析输入内容
