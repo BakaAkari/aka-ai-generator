@@ -23,21 +23,15 @@ async function downloadImageAsBase64(
     const buffer = Buffer.from(response)
     const base64 = buffer.toString('base64')
     
-    // 优先使用响应头 content-type
+    // 通过扩展名检测 MIME 类型
     let mimeType = 'image/jpeg'
-    const contentType = response.headers?.['content-type'] || response.headers?.['Content-Type']
-    if (contentType && contentType.startsWith('image/')) {
-      mimeType = contentType
-    } else {
-      // 回退到扩展名检测
-      const urlLower = url.toLowerCase()
-      if (urlLower.endsWith('.png')) {
-        mimeType = 'image/png'
-      } else if (urlLower.endsWith('.webp')) {
-        mimeType = 'image/webp'
-      } else if (urlLower.endsWith('.gif')) {
-        mimeType = 'image/gif'
-      }
+    const urlLower = url.toLowerCase()
+    if (urlLower.endsWith('.png')) {
+      mimeType = 'image/png'
+    } else if (urlLower.endsWith('.webp')) {
+      mimeType = 'image/webp'
+    } else if (urlLower.endsWith('.gif')) {
+      mimeType = 'image/gif'
     }
     
     logger.debug('图片下载并转换为Base64', { url, mimeType, size: base64.length })

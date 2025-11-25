@@ -31,6 +31,14 @@ export interface StyleConfig {
   prompt: string
 }
 
+export interface StyleGroupConfig {
+  prompts: StyleConfig[]
+}
+
+interface ResolvedStyleConfig extends StyleConfig {
+  groupName?: string
+}
+
 interface StyleCommandModifiers {
   modelMapping?: ModelMappingConfig
   customPromptSuffix?: string
@@ -79,6 +87,7 @@ export interface Config {
   rateLimitMax: number
   adminUsers: string[]
   styles: StyleConfig[]
+  styleGroups?: Record<string, StyleGroupConfig>
   logLevel: 'info' | 'debug'
 }
 
@@ -109,6 +118,11 @@ export interface RechargeHistory {
   lastUpdate: string
   records: RechargeRecord[]
 }
+
+const StyleItemSchema = Schema.object({
+  commandName: Schema.string().required().description('命令名称（不含前缀斜杠）'),
+  prompt: Schema.string().role('textarea', { rows: 4 }).required().description('生成 prompt')
+})
 
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
@@ -175,10 +189,7 @@ export const Config: Schema<Config> = Schema.intersect([
 
   // 自定义风格命令配置
   Schema.object({
-    styles: Schema.array(Schema.object({
-      commandName: Schema.string().required().description('命令名称（不含前缀斜杠）'),
-      prompt: Schema.string().role('textarea', { rows: 4 }).required().description('生成 prompt')
-    })).role('table').default([
+    styles: Schema.array(StyleItemSchema).role('table').default([
       {
         commandName: '变手办',
         prompt: '将这张照片变成手办模型。在它后面放置一个印有图像主体的盒子，桌子上有一台电脑显示Blender建模过程。在盒子前面添加一个圆形塑料底座，角色手办站在上面。如果可能的话，将场景设置在室内'
@@ -187,23 +198,15 @@ export const Config: Schema<Config> = Schema.intersect([
         commandName: '变写实',
         prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征与姿态不变的前提下，生成一张照片级真实感的超写实摄影作品。要求：1. 采用专业相机拍摄（如佳能EOS R5），使用85mm f/1.4人像镜头，呈现柯达Portra 400胶片质感，8K超高清画质，HDR高动态范围，电影级打光效果；2. 画面应具有照片级真实感、超现实主义风格和高细节表现，确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界；3. 使用自然光影营造真实氛围，呈现raw and natural的原始自然感，具有authentic film snapshot的真实胶片质感；4. 整体需具备tactile feel触感质感和simulated texture模拟纹理细节，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素；5. 整体效果需像专业摄影棚拍摄的真实照片，具有电影级画质；6. 如果主体是人物脸部，脸部生成效果应参考欧美混血白人精致美丽帅气英俊的外观特征进行生成，保持精致立体的五官轮廓、健康光泽的肌肤质感、优雅的气质和自然的表情，确保面部特征协调美观。'
       },
-      {
-        commandName: '生成设定',
-        prompt: '请根据用户提供的图片，智能识别图像主体的类型（人物角色、道具物品、载具、建筑、生物等），然后自动生成相应的完整设定方案。要求：1. 首先分析并识别主体的类型和特征；2. 严格遵循原图的艺术风格和细节度，保持与原图一致的视觉风格（如二次元、写实、手绘、3D渲染等）和细节表现水平；3. 去除原图中包含的所有光照信息，包括阴影、高光、明暗对比等，使用均匀、无方向性的平光或标准设定图光照，确保设定图呈现清晰、无光影干扰的展示效果；4. 如果主体是人物角色，生成角色设定（Character Design），包括：比例设定（不同身高对比、头身比等）、三视图（正面、侧面、背面）、表情设定（Expression Sheet）、动作设定（Pose Sheet - 各种常见姿势）、服装设定（Costume Design）；5. 如果主体是道具、武器、载具或物品，生成道具设定（Prop/Item Design），包括：功能结构图（Functional Components）、状态变化展示（State Variations）、细节特写（Detail Close-ups）；6. 如果主体是建筑或场景，生成建筑/场景设定，包括：结构图、不同角度视图、细节展示；7. 如果主体是生物（非人类），生成生物设定，包括：形态特征、不同姿态、细节展示；8. 根据主体的实际类型，智能选择最合适的设定内容，确保生成的设定方案完整、专业且符合该类型的设计规范。'
-      },
-      {
-        commandName: '改姿势',
-        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征、服装细节、艺术风格和整体氛围不变的前提下，生成一个新的姿势造型。新姿势应该更加帅气、可爱、有张力或符合主体内容的动态感，展现出更好的视觉表现力。要求：1. 完全保持主体的面部特征、发型、服装、配饰等所有细节不变；2. 完全保持原有的艺术风格（如二次元、写实、手绘等）不变；3. 只改变身体的姿势、动作和姿态，让主体看起来更有活力和表现力；4. 姿势应该自然、协调，符合主体的身份和性格特征；5. 保持背景环境的基本风格不变（可以适当调整视角或构图）。'
-      },
-      {
-        commandName: '修改设计',
-        prompt: '请根据用户提供的图片，在严格保持原有设计语言、视觉风格、功能特征和整体主题不变的前提下，对图像主体的结构设计进行修改。要求：1. 完全保持原有的设计语言和视觉风格（如现代简约、复古、科幻、奇幻等）不变；2. 保持主体的核心功能特征和身份定位不变；3. 可以合理且美观地添加、删改或修改结构元素（如装饰细节、功能组件、线条轮廓、比例关系等），使设计更加完善和美观；4. 所有修改必须符合原有主题的视觉风格，增强设计美感而不破坏原有设计语言；5. 修改后的设计应该更加协调、统一，具有更好的视觉层次和设计完整性；6. 保持色彩方案、材质质感和整体氛围的一致性。'
-      },
-      {
-        commandName: '变像素',
-        prompt: '请根据用户提供的图片，将图像主体转换为经典的8位像素艺术风格。要求：1. 完全保持主体的身份、外观特征和核心识别元素不变，确保转换后仍然清晰可识别；2. 采用极简的8位像素风格，使用有限的复古调色板（通常为16-256色），营造经典街机游戏的美学氛围；3. 所有细节都进行像素化处理，使用清晰的像素块和锐利的边缘，避免平滑渐变；4. 采用干净的块状形式，保持简单、标志性的设计，突出主体的核心特征；5. 背景可以简化为纯色背景（如纯白或纯黑），或者保持简单的像素化背景，确保主体突出；6. 整体风格应具有强烈的复古游戏感，让人联想到经典街机游戏和早期电子游戏的视觉美学；7. 保持主体的比例和基本结构，但用像素块重新诠释所有细节。'
-      }
     ]).description('自定义风格命令配置')
+  }),
+  Schema.object({
+    styleGroups: Schema.dict(Schema.object({
+      prompts: Schema.array(StyleItemSchema)
+        .role('table')
+        .default([])
+        .description('属于该类型的 prompt 列表')
+    })).role('table').default({}).description('按类型管理的 prompt 组，键名即为分组名称')
   })
 ])
 
@@ -238,6 +241,48 @@ export function apply(ctx: Context, config: Config) {
 
   function normalizeSuffix(value?: string) {
     return value?.replace(/^\-+/, '').trim().toLowerCase()
+  }
+
+  /**
+   * 从 prompt 文本中解析生成图片数量
+   * 支持的模式：生成X张、X张图片、生成 X 张、X张等
+   * @param prompt 原始 prompt 文本
+   * @returns { numImages: number | undefined, cleanedPrompt: string } 解析出的数量和清理后的 prompt
+   */
+  function parseNumImagesFromPrompt(prompt: string): { numImages: number | undefined, cleanedPrompt: string } {
+    if (!prompt || typeof prompt !== 'string') {
+      return { numImages: undefined, cleanedPrompt: prompt }
+    }
+
+    // 匹配模式：生成X张、X张图片、生成 X 张、X张等（X 为 1-4）
+    const patterns = [
+      /生成\s*([1-4])\s*张(?:图片)?/i,
+      /([1-4])\s*张(?:图片)?/,
+      /生成\s*([1-4])\s*个(?:图片)?/i,
+      /([1-4])\s*个(?:图片)?/,
+      /num[:\s]*([1-4])/i,
+      /数量[:\s]*([1-4])/i
+    ]
+
+    let numImages: number | undefined = undefined
+    let cleanedPrompt = prompt
+
+    for (const pattern of patterns) {
+      const match = prompt.match(pattern)
+      if (match) {
+        const num = parseInt(match[1], 10)
+        if (num >= 1 && num <= 4) {
+          numImages = num
+          // 移除匹配到的文本，保留其他内容
+          cleanedPrompt = prompt.replace(pattern, '').trim()
+          // 清理多余的空格和标点
+          cleanedPrompt = cleanedPrompt.replace(/\s+/g, ' ').replace(/[，,]\s*$/, '').trim()
+          break
+        }
+      }
+    }
+
+    return { numImages, cleanedPrompt }
   }
 
   function buildModelMappingIndex(mappings?: ModelMappingConfig[]) {
@@ -347,13 +392,48 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 获取动态风格指令
+  const styleDefinitions = collectStyleDefinitions()
+
+  function collectStyleDefinitions(): ResolvedStyleConfig[] {
+    const unique = new Map<string, ResolvedStyleConfig>()
+
+    const pushStyle = (style?: StyleConfig, groupName?: string) => {
+      if (!style?.commandName || !style?.prompt) return
+      if (unique.has(style.commandName)) {
+        logger.warn('检测到重复的风格命令名称，已跳过', { commandName: style.commandName, groupName })
+        return
+      }
+      unique.set(style.commandName, {
+        ...style,
+        groupName
+      })
+    }
+
+    if (Array.isArray(config.styles)) {
+      for (const style of config.styles) {
+        pushStyle(style)
+      }
+    }
+
+    if (config.styleGroups && typeof config.styleGroups === 'object') {
+      for (const [groupName, group] of Object.entries(config.styleGroups)) {
+        if (!groupName || !group || !Array.isArray(group.prompts)) continue
+        for (const style of group.prompts) {
+          pushStyle(style, groupName)
+        }
+      }
+    }
+
+    return Array.from(unique.values())
+  }
+
   function getStyleCommands() {
-    if (!config.styles || !Array.isArray(config.styles)) return []
-    return config.styles
+    if (!styleDefinitions.length) return []
+    return styleDefinitions
       .filter(style => style.commandName && style.prompt)
       .map(style => ({
         name: style.commandName,
-        description: '图像风格转换'
+        description: style.groupName ? `图像风格转换（${style.groupName}）` : '图像风格转换'
       }))
   }
 
@@ -417,7 +497,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 检查用户每日调用限制
-  async function checkDailyLimit(userId: string): Promise<{ allowed: boolean, message?: string, isAdmin?: boolean }> {
+  async function checkDailyLimit(userId: string, numImages: number = 1): Promise<{ allowed: boolean, message?: string, isAdmin?: boolean }> {
     // 检查是否为管理员
     if (isAdmin(userId)) {
       return { allowed: true, isAdmin: true }
@@ -433,6 +513,14 @@ export function apply(ctx: Context, config: Config) {
     const userData = usersData[userId]
 
     if (!userData) {
+      // 新用户，检查是否有足够的免费次数
+      if (numImages > config.dailyFreeLimit) {
+        return {
+          allowed: false,
+          message: `生成 ${numImages} 张图片需要 ${numImages} 次可用次数，但您的可用次数不足（今日免费：${config.dailyFreeLimit}次，充值：0次）`,
+          isAdmin: false
+        }
+      }
       return { allowed: true, isAdmin: false }
     }
 
@@ -440,27 +528,27 @@ export function apply(ctx: Context, config: Config) {
     const lastReset = new Date(userData.lastDailyReset || userData.createdAt).toDateString()
 
     // 如果是新的一天，重置每日计数（延迟写入，仅在真正使用时写入）
+    let dailyCount = userData.dailyUsageCount
     if (today !== lastReset) {
+      dailyCount = 0
       userData.dailyUsageCount = 0
       userData.lastDailyReset = new Date().toISOString()
       // 不立即写入，等待 updateUserData 时一起写入
     }
 
-    // 检查每日免费次数
-    if (userData.dailyUsageCount < config.dailyFreeLimit) {
-      return { allowed: true, isAdmin: false }
+    // 计算剩余次数
+    const remainingToday = Math.max(0, config.dailyFreeLimit - dailyCount)
+    const totalAvailable = remainingToday + userData.remainingPurchasedCount
+
+    if (totalAvailable < numImages) {
+      return {
+        allowed: false,
+        message: `生成 ${numImages} 张图片需要 ${numImages} 次可用次数，但您的可用次数不足（今日免费剩余：${remainingToday}次，充值剩余：${userData.remainingPurchasedCount}次，共${totalAvailable}次）`,
+        isAdmin: false
+      }
     }
 
-    // 检查充值次数
-    if (userData.remainingPurchasedCount > 0) {
-      return { allowed: true, isAdmin: false }
-    }
-
-    return {
-      allowed: false,
-      message: `今日免费次数已用完（${config.dailyFreeLimit}次），充值次数也已用完。请联系管理员充值或明天再试`,
-      isAdmin: false
-    }
+    return { allowed: true, isAdmin: false }
   }
 
   // 通用输入获取函数
@@ -565,7 +653,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 更新用户数据（优先消耗免费次数）
-  async function updateUserData(userId: string, userName: string, commandName: string): Promise<{ userData: UserData, consumptionType: 'free' | 'purchased' }> {
+  async function updateUserData(userId: string, userName: string, commandName: string, numImages: number = 1): Promise<{ userData: UserData, consumptionType: 'free' | 'purchased' | 'mixed', freeUsed: number, purchasedUsed: number }> {
     const usersData = await loadUsersData()
     const now = new Date().toISOString()
     const today = new Date().toDateString()
@@ -575,8 +663,8 @@ export function apply(ctx: Context, config: Config) {
       usersData[userId] = {
         userId,
         userName: userId,
-        totalUsageCount: 1,
-        dailyUsageCount: 1,
+        totalUsageCount: numImages,
+        dailyUsageCount: numImages,
         lastDailyReset: now,
         purchasedCount: 0,
         remainingPurchasedCount: 0,
@@ -586,12 +674,12 @@ export function apply(ctx: Context, config: Config) {
         createdAt: now
       }
       await saveUsersData(usersData)
-      return { userData: usersData[userId], consumptionType: 'free' }
+      return { userData: usersData[userId], consumptionType: 'free', freeUsed: numImages, purchasedUsed: 0 }
     }
 
     // 更新现有用户数据
     // 不更新用户名，保持原有用户名
-    usersData[userId].totalUsageCount += 1
+    usersData[userId].totalUsageCount += numImages
     usersData[userId].lastUsed = now
 
     // 检查是否需要重置每日计数
@@ -601,27 +689,45 @@ export function apply(ctx: Context, config: Config) {
       usersData[userId].lastDailyReset = now
     }
 
+    // 计算需要消耗的次数
+    let remainingToConsume = numImages
+    let freeUsed = 0
+    let purchasedUsed = 0
+
     // 优先消耗每日免费次数
-    if (usersData[userId].dailyUsageCount < config.dailyFreeLimit) {
-      usersData[userId].dailyUsageCount += 1
-      await saveUsersData(usersData)
-      return { userData: usersData[userId], consumptionType: 'free' }
+    const availableFree = Math.max(0, config.dailyFreeLimit - usersData[userId].dailyUsageCount)
+    if (availableFree > 0) {
+      const freeToUse = Math.min(availableFree, remainingToConsume)
+      usersData[userId].dailyUsageCount += freeToUse
+      freeUsed = freeToUse
+      remainingToConsume -= freeToUse
     }
 
-    // 消耗充值次数
-    if (usersData[userId].remainingPurchasedCount > 0) {
-      usersData[userId].remainingPurchasedCount -= 1
-      await saveUsersData(usersData)
-      return { userData: usersData[userId], consumptionType: 'purchased' }
+    // 如果还有剩余，消耗充值次数
+    if (remainingToConsume > 0) {
+      const purchasedToUse = Math.min(usersData[userId].remainingPurchasedCount, remainingToConsume)
+      usersData[userId].remainingPurchasedCount -= purchasedToUse
+      purchasedUsed = purchasedToUse
+      remainingToConsume -= purchasedToUse
     }
 
-    // 理论上不应该到达这里，因为checkDailyLimit已经检查过了
     await saveUsersData(usersData)
-    return { userData: usersData[userId], consumptionType: 'free' }
+
+    // 确定消费类型
+    let consumptionType: 'free' | 'purchased' | 'mixed'
+    if (freeUsed > 0 && purchasedUsed > 0) {
+      consumptionType = 'mixed'
+    } else if (freeUsed > 0) {
+      consumptionType = 'free'
+    } else {
+      consumptionType = 'purchased'
+    }
+
+    return { userData: usersData[userId], consumptionType, freeUsed, purchasedUsed }
   }
 
   // 记录用户调用次数并发送统计信息（仅在成功时调用）
-  async function recordUserUsage(session: Session, commandName: string) {
+  async function recordUserUsage(session: Session, commandName: string, numImages: number = 1) {
     const userId = session.userId
     const userName = session.username || session.userId || '未知用户'
 
@@ -631,25 +737,37 @@ export function apply(ctx: Context, config: Config) {
     updateRateLimit(userId)
 
     // 更新用户数据
-    const { userData, consumptionType } = await updateUserData(userId, userName, commandName)
+    const { userData, consumptionType, freeUsed, purchasedUsed } = await updateUserData(userId, userName, commandName, numImages)
 
     // 发送统计信息
     if (isAdmin(userId)) {
       await session.send(`📊 使用统计 [管理员]\n用户：${userData.userName}\n总调用次数：${userData.totalUsageCount}次\n状态：无限制使用`)
     } else {
       const remainingToday = Math.max(0, config.dailyFreeLimit - userData.dailyUsageCount)
-      const consumptionText = consumptionType === 'free' ? '每日免费次数' : '充值次数'
-      await session.send(`📊 使用统计\n用户：${userData.userName}\n本次消费：${consumptionText} -1\n总调用次数：${userData.totalUsageCount}次\n今日剩余免费：${remainingToday}次\n充值剩余：${userData.remainingPurchasedCount}次`)
+      
+      let consumptionText = ''
+      if (consumptionType === 'mixed') {
+        consumptionText = `每日免费次数 -${freeUsed}，充值次数 -${purchasedUsed}`
+      } else if (consumptionType === 'free') {
+        consumptionText = `每日免费次数 -${freeUsed}`
+      } else {
+        consumptionText = `充值次数 -${purchasedUsed}`
+      }
+      
+      await session.send(`📊 使用统计\n用户：${userData.userName}\n本次生成：${numImages}张图片\n本次消费：${consumptionText}\n总调用次数：${userData.totalUsageCount}次\n今日剩余免费：${remainingToday}次\n充值剩余：${userData.remainingPurchasedCount}次`)
     }
 
     logger.info('用户调用记录', {
       userId,
       userName: userData.userName,
       commandName,
+      numImages,
+      consumptionType,
+      freeUsed,
+      purchasedUsed,
       totalUsageCount: userData.totalUsageCount,
       dailyUsageCount: userData.dailyUsageCount,
       remainingPurchasedCount: userData.remainingPurchasedCount,
-      consumptionType,
       isAdmin: isAdmin(userId)
     })
   }
@@ -829,8 +947,8 @@ export function apply(ctx: Context, config: Config) {
         }
       }
 
-      // 成功处理图片后记录使用统计
-      await recordUserUsage(session, styleName)
+      // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
+      await recordUserUsage(session, styleName, images.length)
 
       activeTasks.delete(userId)
 
@@ -854,8 +972,8 @@ export function apply(ctx: Context, config: Config) {
 
 
   // 动态注册风格命令
-  if (config.styles && Array.isArray(config.styles)) {
-    for (const style of config.styles) {
+  if (styleDefinitions.length > 0) {
+    for (const style of styleDefinitions) {
       if (style.commandName && style.prompt) {
         ctx.command(`${style.commandName} [img:text]`, '图像风格转换')
           .option('num', '-n <num:number> 生成图片数量 (1-4)')
@@ -863,24 +981,50 @@ export function apply(ctx: Context, config: Config) {
             const { session, options } = argv
             if (!session?.userId) return '会话无效'
 
-            // 检查每日调用限制
-            const limitCheck = await checkDailyLimit(session.userId!)
+            const modifiers = parseStyleCommandModifiers(argv, img)
+            
+            // 从用户自定义部分解析生成数量（不包括预设的 style.prompt）
+            let userPromptParts: string[] = []
+            if (modifiers.customAdditions?.length) {
+              userPromptParts.push(...modifiers.customAdditions)
+            }
+            if (modifiers.customPromptSuffix) {
+              userPromptParts.push(modifiers.customPromptSuffix)
+            }
+            const userPromptText = userPromptParts.join(' - ')
+            
+            // 从用户输入中解析数量
+            let promptNumImages: number | undefined = undefined
+            let cleanedUserPrompt = userPromptText
+            if (userPromptText) {
+              const parsed = parseNumImagesFromPrompt(userPromptText)
+              if (parsed.numImages) {
+                promptNumImages = parsed.numImages
+                cleanedUserPrompt = parsed.cleanedPrompt
+                if (config.logLevel === 'debug') {
+                  logger.debug('从 prompt 中解析到生成数量', { numImages: promptNumImages, cleanedPrompt: cleanedUserPrompt })
+                }
+              }
+            }
+            
+            // 确定要生成的图片数量
+            const numImages = options?.num || promptNumImages || config.defaultNumImages
+
+            // 检查每日调用限制（传入实际要生成的图片数量）
+            const limitCheck = await checkDailyLimit(session.userId!, numImages)
             if (!limitCheck.allowed) {
               return limitCheck.message
             }
-
-            const modifiers = parseStyleCommandModifiers(argv, img)
+            
+            // 构建最终的 prompt（保留预设的 style.prompt，使用清理后的用户输入）
             const promptSegments = [style.prompt]
-            if (modifiers.customAdditions?.length) {
-              promptSegments.push(...modifiers.customAdditions)
-            }
-            if (modifiers.customPromptSuffix) {
-              promptSegments.push(modifiers.customPromptSuffix)
+            if (cleanedUserPrompt) {
+              promptSegments.push(cleanedUserPrompt)
             }
             const mergedPrompt = promptSegments.filter(Boolean).join(' - ')
 
             const requestContext: ImageRequestContext = {
-              numImages: options?.num
+              numImages: numImages
             }
             if (modifiers.modelMapping?.provider) {
               requestContext.provider = modifiers.modelMapping.provider as ProviderType
@@ -912,12 +1056,6 @@ export function apply(ctx: Context, config: Config) {
     .option('num', '-n <num:number> 生成图片数量 (1-4)')
     .action(async ({ session, options }) => {
       if (!session?.userId) return '会话无效'
-
-      // 检查每日调用限制
-      const limitCheck = await checkDailyLimit(session.userId)
-      if (!limitCheck.allowed) {
-        return limitCheck.message
-      }
 
       return Promise.race([
         (async () => {
@@ -1000,12 +1138,27 @@ export function apply(ctx: Context, config: Config) {
             return '未检测到prompt描述，请重新发送'
           }
 
+          // 从 prompt 中解析生成数量
+          const { numImages: promptNumImages, cleanedPrompt } = parseNumImagesFromPrompt(prompt)
+          if (promptNumImages) {
+            prompt = cleanedPrompt
+            if (config.logLevel === 'debug') {
+              logger.debug('从 prompt 中解析到生成数量', { numImages: promptNumImages, cleanedPrompt })
+            }
+          }
+
           const imageUrl = collectedImages[0]
-          const imageCount = options?.num || config.defaultNumImages
+          const imageCount = options?.num || promptNumImages || config.defaultNumImages
 
           // 验证参数
           if (imageCount < 1 || imageCount > 4) {
             return '生成数量必须在 1-4 之间'
+          }
+
+          // 检查每日调用限制（传入实际要生成的图片数量）
+          const limitCheck = await checkDailyLimit(userId, imageCount)
+          if (!limitCheck.allowed) {
+            return limitCheck.message
           }
 
           logger.info('开始自定义图像处理', {
@@ -1039,8 +1192,8 @@ export function apply(ctx: Context, config: Config) {
               }
             }
 
-            // 成功处理图片后记录使用统计
-            await recordUserUsage(session, COMMANDS.GENERATE_IMAGE)
+            // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
+            await recordUserUsage(session, COMMANDS.GENERATE_IMAGE, resultImages.length)
 
             activeTasks.delete(userId)
 
@@ -1077,12 +1230,6 @@ export function apply(ctx: Context, config: Config) {
     .option('num', '-n <num:number> 生成图片数量 (1-4)')
     .action(async ({ session, options }) => {
       if (!session?.userId) return '会话无效'
-
-      // 检查每日调用限制
-      const limitCheck = await checkDailyLimit(session.userId)
-      if (!limitCheck.allowed) {
-        return limitCheck.message
-      }
 
       return Promise.race([
         (async () => {
@@ -1151,11 +1298,26 @@ export function apply(ctx: Context, config: Config) {
             return '未检测到prompt描述，请重新发送'
           }
 
-          const imageCount = options?.num || config.defaultNumImages
+          // 从 prompt 中解析生成数量
+          const { numImages: promptNumImages, cleanedPrompt } = parseNumImagesFromPrompt(prompt)
+          if (promptNumImages) {
+            prompt = cleanedPrompt
+            if (config.logLevel === 'debug') {
+              logger.debug('从 prompt 中解析到生成数量', { numImages: promptNumImages, cleanedPrompt })
+            }
+          }
+
+          const imageCount = options?.num || promptNumImages || config.defaultNumImages
 
           // 验证参数
           if (imageCount < 1 || imageCount > 4) {
             return '生成数量必须在 1-4 之间'
+          }
+
+          // 检查每日调用限制（传入实际要生成的图片数量）
+          const limitCheck = await checkDailyLimit(userId, imageCount)
+          if (!limitCheck.allowed) {
+            return limitCheck.message
           }
 
           logger.info('开始图片合成处理', {
@@ -1190,8 +1352,8 @@ export function apply(ctx: Context, config: Config) {
               }
             }
 
-            // 成功处理图片后记录使用统计
-            await recordUserUsage(session, COMMANDS.COMPOSE_IMAGE)
+            // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
+            await recordUserUsage(session, COMMANDS.COMPOSE_IMAGE, resultImages.length)
 
             activeTasks.delete(userId)
 
