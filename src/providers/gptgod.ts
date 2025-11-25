@@ -20,14 +20,14 @@ async function downloadImageAsBase64(
   logger: any
 ): Promise<{ data: string, mimeType: string }> {
   try {
-    const response = await ctx.http.get(url, { 
+    const response = await ctx.http.get(url, {
       responseType: 'arraybuffer',
       timeout: timeout * 1000
     })
-    
+
     const buffer = Buffer.from(response)
     const base64 = buffer.toString('base64')
-    
+
     // 优先使用响应头 content-type
     let mimeType = 'image/jpeg'
     const contentType = response.headers?.['content-type'] || response.headers?.['Content-Type']
@@ -44,7 +44,7 @@ async function downloadImageAsBase64(
         mimeType = 'image/gif'
       }
     }
-    
+
     if (logger) {
       logger.debug('图片下载并转换为Base64', { url, mimeType, size: base64.length })
     }
@@ -102,7 +102,7 @@ async function buildImageContentPart(
 function parseGptGodResponse(response: any, logger?: any): string[] {
   try {
     const images: string[] = []
-    
+
     // 检查是否有直接的图片 URL 数组
     if (Array.isArray(response.images)) {
       if (logger) {
@@ -110,7 +110,7 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
       }
       return response.images
     }
-    
+
     // 检查是否有单个图片字段
     if (response.image && typeof response.image === 'string') {
       if (response.image.startsWith('data:') || response.image.startsWith('http')) {
@@ -121,7 +121,7 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
         return images
       }
     }
-    
+
     // 检查 choices 数组
     if (response?.choices?.length > 0) {
       const firstChoice = response.choices[0]
@@ -179,7 +179,7 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
             images.push(trimmedUrl)
           }
         }
-        
+
         // 检查是否有 data: URL
         const dataUrlRegex = /(data:image\/[^;]+;base64,[^\s"')<>]+)/gi
         let dataUrlMatch
@@ -187,7 +187,7 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
           images.push(dataUrlMatch[1])
         }
       }
-      
+
       // 检查 message 中是否有其他图片相关字段
       if (images.length === 0 && firstChoice.message) {
         // 检查是否有 image_url 字段
@@ -206,13 +206,13 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
         }
       }
     }
-    
+
     // 检查响应根级别的其他可能字段
     if (images.length === 0) {
       // 检查 data 字段
-        if (response.data) {
+      if (response.data) {
         if (Array.isArray(response.data)) {
-          const dataImages = response.data.filter((item: any) => 
+          const dataImages = response.data.filter((item: any) =>
             item?.url || item?.image_url || (typeof item === 'string' && (item.startsWith('http') || item.startsWith('data:')))
           ).map((item: any) => item?.url || item?.image_url || item)
           if (dataImages.length > 0) {
@@ -228,11 +228,11 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
           images.push(response.data.url || response.data.image_url)
         }
       }
-      
+
       // 检查 result 字段
       if (response.result) {
         if (Array.isArray(response.result)) {
-          const resultImages = response.result.filter((item: any) => 
+          const resultImages = response.result.filter((item: any) =>
             item?.url || item?.image_url || (typeof item === 'string' && (item.startsWith('http') || item.startsWith('data:')))
           ).map((item: any) => item?.url || item?.image_url || item)
           if (resultImages.length > 0) {
@@ -249,14 +249,14 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
         }
       }
     }
-    
+
     if (images.length > 0) {
       if (logger) {
         logger.debug('成功提取图片', { count: images.length })
       }
     } else {
       if (logger) {
-        logger.warn('未能从响应中提取图片', { 
+        logger.warn('未能从响应中提取图片', {
           responseStructure: {
             hasChoices: !!response?.choices,
             hasImages: !!response?.images,
@@ -268,7 +268,7 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
         })
       }
     }
-    
+
     return images
   } catch (error) {
     logger?.error('解析响应时出错', { error })
@@ -325,138 +325,202 @@ export class GptGodProvider implements ImageProvider {
       ]
     }
 
-    try {
-      const response = await ctx.http.post(
-        GPTGOD_DEFAULT_API_URL,
-        requestData,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.config.apiKey}`
-          },
-          timeout: this.config.apiTimeout * 1000
-        }
-      )
-      
-      logger.success('GPTGod 图像编辑 API 调用成功')
-      
-      // 检查响应中是否有错误信息
-      if (response?.choices?.length > 0) {
-        const firstChoice = response.choices[0]
-        const messageContent = firstChoice.message?.content
-        let errorMessage = ''
-        
-        // 提取错误消息
-        if (typeof messageContent === 'string') {
-          errorMessage = messageContent
-        } else if (Array.isArray(messageContent)) {
-          const textParts = messageContent
-            .filter((part: any) => part?.type === 'text' && part?.text)
-            .map((part: any) => part.text)
-            .join(' ')
-          errorMessage = textParts
-        } else if (messageContent?.text) {
-          errorMessage = messageContent.text
-        }
-        
-        // 检查是否是内容政策错误
-        if (errorMessage && (
-          errorMessage.includes('PROHIBITED_CONTENT') ||
-          errorMessage.includes('blocked by Google Gemini') ||
-          errorMessage.includes('prohibited under official usage policies') ||
-          errorMessage.toLowerCase().includes('content is prohibited')
-        )) {
-          logger.error('内容被 Google Gemini 政策拦截', { 
-            errorMessage: errorMessage.substring(0, 200),
-            finishReason: firstChoice.finish_reason
-          })
-          throw new Error('内容被安全策略拦截')
-        }
-        
-        // 检查其他错误消息
-        if (errorMessage && (
-          errorMessage.toLowerCase().includes('error') ||
-          errorMessage.toLowerCase().includes('failed') ||
-          errorMessage.toLowerCase().includes('blocked')
-        ) && !errorMessage.match(/https?:\/\//)) {
-          // 如果错误消息中没有URL（可能是图片URL），则认为是错误
-          logger.error('API 返回错误消息', { 
-            errorMessage: errorMessage.substring(0, 200),
-            finishReason: firstChoice.finish_reason
-          })
-          // 提取关键错误信息
-          const shortError = errorMessage.length > 50 ? errorMessage.substring(0, 50) + '...' : errorMessage
-          throw new Error(`处理失败：${shortError}`)
-        }
-      }
-      
-      // 添加调试日志，输出响应结构（仅在debug模式下）
-      if (this.config.logLevel === 'debug') {
-        logger.debug('GPTGod API 响应结构', { 
-          hasChoices: !!response?.choices,
-          choicesLength: response?.choices?.length,
-          hasImages: !!response?.images,
-          hasImage: !!response?.image,
-          responseKeys: Object.keys(response || {}),
-          firstChoiceContent: response?.choices?.[0]?.message?.content ? 
-            (typeof response.choices[0].message.content === 'string' ? 
-              response.choices[0].message.content.substring(0, 200) : 
-              JSON.stringify(response.choices[0].message.content).substring(0, 200)) : 
-            'none'
-        })
-      }
-      
-      const images = parseGptGodResponse(response, this.config.logLevel === 'debug' ? logger : null)
-      
-      // 如果返回的图片数量不足，记录警告和完整响应
-      if (images.length < numImages) {
-        const warnData: any = { 
-          requested: numImages, 
-          received: images.length
-        }
+    // 重试配置
+    const maxRetries = 3
+    let lastError: any = null
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // 计算请求体大小（用于调试）
+        const requestBodySize = JSON.stringify(requestData).length
         if (this.config.logLevel === 'debug') {
-          warnData.responsePreview = JSON.stringify(response).substring(0, 500)
+          logger.debug(`GPTGod API 请求 (尝试 ${attempt}/${maxRetries})`, {
+            requestBodySize: `${(requestBodySize / 1024).toFixed(2)} KB`,
+            imageCount: urls.length
+          })
         }
-        logger.warn('生成的图片数量不足', warnData)
-        
-        // 如果一张图片都没有生成，且响应中有错误信息，抛出更明确的错误
-        if (images.length === 0 && response?.choices?.[0]?.message?.content) {
-          const content = response.choices[0].message.content
-          const contentText = typeof content === 'string' ? content : 
-            (Array.isArray(content) ? content.map((p: any) => p?.text || '').join(' ') : '')
-          
-          if (contentText && !contentText.match(/https?:\/\//)) {
-            // 如果内容中没有URL，可能是错误消息
-            const shortError = contentText.length > 50 ? contentText.substring(0, 50) + '...' : contentText
-            throw new Error(`生成失败：${shortError}`)
+
+        const response = await ctx.http.post(
+          GPTGOD_DEFAULT_API_URL,
+          requestData,
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${this.config.apiKey}`
+            },
+            timeout: this.config.apiTimeout * 1000
+          }
+        )
+
+        logger.success('GPTGod 图像编辑 API 调用成功')
+
+        // 检查响应中是否有错误信息
+        if (response?.choices?.length > 0) {
+          const firstChoice = response.choices[0]
+          const messageContent = firstChoice.message?.content
+          let errorMessage = ''
+
+          // 提取错误消息
+          if (typeof messageContent === 'string') {
+            errorMessage = messageContent
+          } else if (Array.isArray(messageContent)) {
+            const textParts = messageContent
+              .filter((part: any) => part?.type === 'text' && part?.text)
+              .map((part: any) => part.text)
+              .join(' ')
+            errorMessage = textParts
+          } else if (messageContent?.text) {
+            errorMessage = messageContent.text
+          }
+
+          // 检查是否是内容政策错误
+          if (errorMessage && (
+            errorMessage.includes('PROHIBITED_CONTENT') ||
+            errorMessage.includes('blocked by Google Gemini') ||
+            errorMessage.includes('prohibited under official usage policies') ||
+            errorMessage.toLowerCase().includes('content is prohibited')
+          )) {
+            logger.error('内容被 Google Gemini 政策拦截', {
+              errorMessage: errorMessage.substring(0, 200),
+              finishReason: firstChoice.finish_reason
+            })
+            throw new Error('内容被安全策略拦截')
+          }
+
+          // 检查其他错误消息
+          if (errorMessage && (
+            errorMessage.toLowerCase().includes('error') ||
+            errorMessage.toLowerCase().includes('failed') ||
+            errorMessage.toLowerCase().includes('blocked')
+          ) && !errorMessage.match(/https?:\/\//)) {
+            // 如果错误消息中没有URL（可能是图片URL），则认为是错误
+            logger.error('API 返回错误消息', {
+              errorMessage: errorMessage.substring(0, 200),
+              finishReason: firstChoice.finish_reason
+            })
+            // 提取关键错误信息
+            const shortError = errorMessage.length > 50 ? errorMessage.substring(0, 50) + '...' : errorMessage
+            throw new Error(`处理失败：${shortError}`)
           }
         }
+
+        // 添加调试日志，输出响应结构（仅在debug模式下）
+        if (this.config.logLevel === 'debug') {
+          logger.debug('GPTGod API 响应结构', {
+            hasChoices: !!response?.choices,
+            choicesLength: response?.choices?.length,
+            hasImages: !!response?.images,
+            hasImage: !!response?.image,
+            responseKeys: Object.keys(response || {}),
+            firstChoiceContent: response?.choices?.[0]?.message?.content ?
+              (typeof response.choices[0].message.content === 'string' ?
+                response.choices[0].message.content.substring(0, 200) :
+                JSON.stringify(response.choices[0].message.content).substring(0, 200)) :
+              'none'
+          })
+        }
+
+        const images = parseGptGodResponse(response, this.config.logLevel === 'debug' ? logger : null)
+
+        // 如果返回的图片数量不足，记录警告和完整响应
+        if (images.length < numImages) {
+          const warnData: any = {
+            requested: numImages,
+            received: images.length
+          }
+          if (this.config.logLevel === 'debug') {
+            warnData.responsePreview = JSON.stringify(response).substring(0, 500)
+          }
+          logger.warn('生成的图片数量不足', warnData)
+
+          // 如果一张图片都没有生成，且响应中有错误信息，抛出更明确的错误
+          if (images.length === 0 && response?.choices?.[0]?.message?.content) {
+            const content = response.choices[0].message.content
+            const contentText = typeof content === 'string' ? content :
+              (Array.isArray(content) ? content.map((p: any) => p?.text || '').join(' ') : '')
+
+            if (contentText && !contentText.match(/https?:\/\//)) {
+              // 如果内容中没有URL，可能是错误消息
+              const shortError = contentText.length > 50 ? contentText.substring(0, 50) + '...' : contentText
+              throw new Error(`生成失败：${shortError}`)
+            }
+          }
+        }
+
+        return images
+      } catch (error: any) {
+        lastError = error
+
+        // 如果是内容策略错误或其他已明确处理的错误，直接抛出原错误（不重试）
+        if (error?.message && (
+          error.message.includes('内容被安全策略拦截') ||
+          error.message.includes('生成失败') ||
+          error.message.includes('处理失败')
+        )) {
+          throw error
+        }
+
+        // 检查是否是连接错误（可重试的错误）
+        const isRetryableError = 
+          error?.cause?.code === 'UND_ERR_SOCKET' || // Socket 错误
+          error?.code === 'UND_ERR_SOCKET' ||
+          error?.message?.includes('other side closed') ||
+          error?.message?.includes('fetch failed') ||
+          error?.message?.includes('ECONNRESET') ||
+          error?.message?.includes('ETIMEDOUT') ||
+          (error?.response?.status >= 500 && error?.response?.status < 600) // 5xx 服务器错误
+
+        if (isRetryableError && attempt < maxRetries) {
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000) // 指数退避，最多5秒
+          logger.warn(`GPTGod API 调用失败，将在 ${delay}ms 后重试 (${attempt}/${maxRetries})`, {
+            error: error?.message || error?.cause?.message || '连接错误',
+            code: error?.code || error?.cause?.code
+          })
+          await new Promise(resolve => setTimeout(resolve, delay))
+          continue // 重试
+        }
+
+        // 不可重试的错误或已达到最大重试次数
+        logger.error('GPTGod 图像编辑 API 调用失败', {
+          message: error?.message || '未知错误',
+          name: error?.name,
+          code: error?.code,
+          status: error?.response?.status,
+          statusText: error?.response?.statusText,
+          data: error?.response?.data,
+          stack: error?.stack,
+          cause: error?.cause,
+          attempt,
+          maxRetries,
+          // 如果是 axios 错误，通常会有 config 和 request 信息
+          url: error?.config?.url,
+          method: error?.config?.method,
+          headers: error?.config?.headers
+        })
+
+        // 根据错误类型返回更明确的错误信息
+        if (error?.cause?.code === 'UND_ERR_SOCKET' || error?.message?.includes('other side closed')) {
+          throw new Error('图像处理失败：服务器连接中断，可能是服务器负载过高或网络不稳定，请稍后重试')
+        }
+
+        if (error?.message?.includes('fetch') && error?.message?.includes(GPTGOD_DEFAULT_API_URL)) {
+          throw new Error('图像处理失败：无法连接 GPTGod API 服务器，请检查网络连接或稍后重试')
+        }
+
+        if (error?.response?.status === 413) {
+          throw new Error('图像处理失败：请求体过大，请尝试使用较小的图片')
+        }
+
+        if (error?.response?.status === 429) {
+          throw new Error('图像处理失败：请求过于频繁，请稍后重试')
+        }
+
+        throw new Error('图像处理API调用失败')
       }
-      
-      return images
-    } catch (error: any) {
-      // 如果是内容策略错误或其他已明确处理的错误，直接抛出原错误
-      if (error?.message && (
-        error.message.includes('内容被安全策略拦截') ||
-        error.message.includes('生成失败') ||
-        error.message.includes('处理失败')
-      )) {
-        throw error
-      }
-      
-      logger.error('GPTGod 图像编辑 API 调用失败', {
-        message: error?.message || '未知错误',
-        code: error?.code,
-        status: error?.response?.status,
-        data: error?.response?.data
-      })
-      
-      if (error?.message?.includes('fetch') && error?.message?.includes(GPTGOD_DEFAULT_API_URL)) {
-        throw new Error('图像处理失败：无法连接 GPTGod API 服务器，请稍后重试')
-      }
-      
-      throw new Error('图像处理API调用失败')
     }
+
+    // 如果所有重试都失败了，抛出最后一次的错误
+    throw lastError
   }
 }
 
