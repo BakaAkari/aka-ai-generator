@@ -15,7 +15,8 @@ const COMMANDS = {
   QUERY_QUOTA: '图像额度',
   RECHARGE: '图像充值',
   RECHARGE_HISTORY: '图像充值记录',
-  FUNCTION_LIST: '图像功能'
+  FUNCTION_LIST: '图像功能',
+  IMAGE_COMMANDS: '图像指令'
 } as const
 
 export type ImageProvider = 'yunwu' | 'gptgod'
@@ -1632,6 +1633,33 @@ export function apply(ctx: Context, config: Config) {
         logger.error('获取功能列表失败', error)
         return '获取功能列表失败，请稍后重试'
       }
+    })
+
+
+  // 图像指令列表命令
+  ctx.command(COMMANDS.IMAGE_COMMANDS, '查看图像生成指令列表')
+    .action(async ({ session }) => {
+      if (!session?.userId) return '会话无效'
+
+      // 获取全局 prefix
+      const globalConfig = ctx.root.config as any
+      const prefixConfig = globalConfig.prefix
+      
+      let prefix = ''
+      if (Array.isArray(prefixConfig) && prefixConfig.length > 0) {
+        prefix = prefixConfig[0]
+      } else if (typeof prefixConfig === 'string') {
+        prefix = prefixConfig
+      }
+
+      const lines = ['🎨 图像生成指令列表：\n']
+      
+      // 遍历用户指令
+      commandRegistry.userCommands.forEach(cmd => {
+        lines.push(`${prefix}${cmd.name} - ${cmd.description}`)
+      })
+
+      return lines.join('\n')
     })
 
   const providerLabel = (config.provider as ProviderType) === 'gptgod' ? 'GPTGod' : '云雾 Gemini 2.5 Flash Image'
