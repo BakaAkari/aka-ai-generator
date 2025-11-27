@@ -30,6 +30,7 @@ export interface ModelMappingConfig {
 export interface StyleConfig {
   commandName: string
   prompt: string
+  mode?: 'single' | 'multiple'
 }
 
 export interface StyleGroupConfig {
@@ -122,7 +123,11 @@ export interface RechargeHistory {
 
 const StyleItemSchema = Schema.object({
   commandName: Schema.string().required().description('命令名称（不含前缀斜杠）'),
-  prompt: Schema.string().role('textarea', { rows: 4 }).required().description('生成 prompt')
+  prompt: Schema.string().role('textarea', { rows: 4 }).required().description('生成 prompt'),
+  mode: Schema.union([
+    Schema.const('single').description('单图模式'),
+    Schema.const('multiple').description('多图模式')
+  ]).default('single').description('图片输入模式')
 })
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -774,68 +779,89 @@ export function apply(ctx: Context, config: Config) {
   }
 
 
-  // 获取图片URL（三种方式）
-  async function getImageUrl(img: any, session: Session): Promise<string | null> {
-    let url: string | null = null
+  // 获取输入数据（支持单图/多图）
+  async function getInputData(session: Session, imgParam: any, mode: 'single' | 'multiple'): Promise<{ images: string[], text?: string } | { error: string }> {
+    const collectedImages: string[] = []
+    let collectedText = ''
 
-    // 方法1：从命令参数获取图片
-    if (img) {
-      url = img.attrs?.src || null
-      if (url) {
-        if (config.logLevel === 'debug') {
-          logger.debug('从命令参数获取图片', { url })
+    // 1. 从命令参数获取
+    if (imgParam) {
+      if (typeof imgParam === 'object' && imgParam.attrs?.src) {
+        collectedImages.push(imgParam.attrs.src)
+      } else if (typeof imgParam === 'string') {
+        // 简单的URL检查
+        if (imgParam.startsWith('http') || imgParam.startsWith('data:')) {
+          collectedImages.push(imgParam)
         }
-        return url
       }
     }
 
-    // 方法2：从引用消息获取图片
-    let elements = session.quote?.elements
-    if (elements) {
+    // 2. 从引用消息获取
+    if (session.quote?.elements) {
+      const quoteImages = h.select(session.quote.elements, 'img')
+      for (const img of quoteImages) {
+        if (img.attrs.src) collectedImages.push(img.attrs.src)
+      }
+    }
+
+    // 如果已经有图片，直接返回
+    if (collectedImages.length > 0) {
+      if (mode === 'single') {
+        if (collectedImages.length > 1) {
+          return { error: '本功能仅支持处理一张图片，检测到多张图片。如需合成多张图片请使用"合成图像"命令' }
+        }
+        return { images: collectedImages }
+      }
+      return { images: collectedImages }
+    }
+
+    // 3. 交互式获取
+    const promptMsg = mode === 'single' ? '请在30秒内发送一张图片' : '请发送图片（发送纯文字结束，至少需要2张）'
+    await session.send(promptMsg)
+
+    while (true) {
+      const msg = await session.prompt(mode === 'multiple' ? 60000 : 30000)
+      if (!msg) return { error: '等待超时' }
+
+      const elements = h.parse(msg)
       const images = h.select(elements, 'img')
+      const textElements = h.select(elements, 'text')
+      const text = textElements.map(el => el.attrs.content).join(' ').trim()
+
       if (images.length > 0) {
-        // 检查是否有多张图片
-        if (images.length > 1) {
-          await session.send('本功能仅支持处理一张图片，检测到多张图片。如需合成多张图片请使用"合成图像"命令')
-          return null
+        for (const img of images) {
+          collectedImages.push(img.attrs.src)
         }
-        url = images[0].attrs.src
-        if (config.logLevel === 'debug') {
-          logger.debug('从引用消息获取图片', { url })
+
+        if (mode === 'single') {
+          if (collectedImages.length > 1) {
+            return { error: '本功能仅支持处理一张图片，检测到多张图片' }
+          }
+          if (text) collectedText = text
+          break
         }
-        return url
+
+        // 多图模式
+        if (text) {
+          collectedText = text
+          break
+        }
+
+        await session.send(`已收到 ${collectedImages.length} 张图片，继续发送或输入文字结束`)
+        continue
+      }
+
+      if (text) {
+        if (collectedImages.length === 0) {
+          await session.send('未检测到图片，请先发送图片')
+          continue
+        }
+        collectedText = text
+        break
       }
     }
 
-    // 方法3：等待用户发送图片
-    await session.send('请在30秒内发送一张图片')
-    const msg = await session.prompt(30000)
-
-    if (!msg) {
-      await session.send('等待超时')
-      return null
-    }
-
-    // 解析用户发送的消息
-    elements = h.parse(msg)
-    const images = h.select(elements, 'img')
-
-    if (images.length === 0) {
-      await session.send('未检测到图片，请重试')
-      return null
-    }
-
-    // 检查是否有多张图片
-    if (images.length > 1) {
-      await session.send('本功能仅支持处理一张图片，检测到多张图片。如需合成多张图片请使用"合成图像"命令')
-      return null
-    }
-
-    url = images[0].attrs.src
-    if (config.logLevel === 'debug') {
-      logger.debug('从用户输入获取图片', { url })
-    }
-    return url
+    return { images: collectedImages, text: collectedText }
   }
 
   // 使用供应商生成图像
@@ -854,9 +880,9 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 带超时的通用图像处理函数
-  async function processImageWithTimeout(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }) {
+  async function processImageWithTimeout(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, mode: 'single' | 'multiple' = 'single') {
     return Promise.race([
-      processImage(session, img, prompt, styleName, requestContext, displayInfo),
+      processImage(session, img, prompt, styleName, requestContext, displayInfo, mode),
       new Promise<string>((_, reject) =>
         setTimeout(() => reject(new Error('命令执行超时')), config.commandTimeout * 1000)
       )
@@ -864,12 +890,12 @@ export function apply(ctx: Context, config: Config) {
       const userId = session.userId
       if (userId) activeTasks.delete(userId)
       logger.error('图像处理超时或失败', { userId, error })
-      return error.message === '命令执行超时' ? '图像处理超时，请重试' : '图像处理失败，请稍后重试'
+      return error.message === '命令执行超时' ? '图像处理超时，请重试' : `图像处理失败：${error.message}`
     })
   }
 
   // 通用图像处理函数
-  async function processImage(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }) {
+  async function processImage(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, mode: 'single' | 'multiple' = 'single') {
     const userId = session.userId
 
     // 检查是否已有任务进行
@@ -885,10 +911,17 @@ export function apply(ctx: Context, config: Config) {
       return '生成数量必须在 1-4 之间'
     }
 
-    // 获取图片URL
-    const imageUrl = await getImageUrl(img, session)
-    if (!imageUrl) {
-      return  // 错误信息已在 getImageUrl 中发送
+    // 获取输入数据
+    const inputResult = await getInputData(session, img, mode)
+    if ('error' in inputResult) {
+      return inputResult.error
+    }
+    const { images: imageUrls, text: extraText } = inputResult
+
+    // 如果在交互中提供了额外文本，追加到 prompt
+    let finalPrompt = prompt
+    if (extraText) {
+      finalPrompt += ' ' + extraText
     }
 
     const providerType = (requestContext?.provider || config.provider) as ProviderType
@@ -896,9 +929,9 @@ export function apply(ctx: Context, config: Config) {
 
     logger.info('开始图像处理', {
       userId,
-      imageUrl,
+      imageUrls,
       styleName,
-      prompt,
+      prompt: finalPrompt,
       numImages: imageCount,
       provider: providerType,
       modelId: providerModelId
@@ -929,7 +962,7 @@ export function apply(ctx: Context, config: Config) {
     try {
       activeTasks.set(userId, 'processing')
 
-      const images = await requestProviderImages(prompt, imageUrl, imageCount, requestContext)
+      const images = await requestProviderImages(finalPrompt, imageUrls, imageCount, requestContext)
 
       if (images.length === 0) {
         activeTasks.delete(userId)
@@ -957,16 +990,11 @@ export function apply(ctx: Context, config: Config) {
       activeTasks.delete(userId)
       logger.error('图像处理失败', { userId, error })
 
-      // 如果是明确的错误信息（如内容策略拦截），直接返回
-      if (error?.message && (
-        error.message.includes('内容被安全策略拦截') ||
-        error.message.includes('生成失败') ||
-        error.message.includes('处理失败')
-      )) {
-        return error.message
+      // 直接返回错误信息，以便用户知道具体原因
+      if (error?.message) {
+        return `图像处理失败：${error.message}`
       }
 
-      // 不返回具体错误信息，避免泄露API密钥或其他敏感信息
       return '图像处理失败，请稍后重试'
     }
   }
@@ -1044,7 +1072,8 @@ export function apply(ctx: Context, config: Config) {
               displayInfo.modelDescription = modifiers.modelMapping.suffix || modifiers.modelMapping.modelId
             }
 
-            return processImageWithTimeout(session, img, mergedPrompt, style.commandName, requestContext, displayInfo)
+            const mode = style.mode || 'single'
+            return processImageWithTimeout(session, img, mergedPrompt, style.commandName, requestContext, displayInfo, mode)
           })
 
         logger.info(`已注册命令: ${style.commandName}`)
@@ -1202,16 +1231,11 @@ export function apply(ctx: Context, config: Config) {
             activeTasks.delete(userId)
             logger.error('自定义图像处理失败', { userId, error })
 
-            // 如果是明确的错误信息（如内容策略拦截），直接返回
-            if (error?.message && (
-              error.message.includes('内容被安全策略拦截') ||
-              error.message.includes('生成失败') ||
-              error.message.includes('处理失败')
-            )) {
-              return error.message
+            // 直接返回错误信息
+            if (error?.message) {
+              return `图像处理失败：${error.message}`
             }
 
-            // 不返回具体错误信息，避免泄露API密钥或其他敏感信息
             return '图像处理失败，请稍后重试'
           }
         })(),
@@ -1222,7 +1246,7 @@ export function apply(ctx: Context, config: Config) {
         const userId = session.userId
         if (userId) activeTasks.delete(userId)
         logger.error('自定义图像处理超时或失败', { userId, error })
-        return error.message === '命令执行超时' ? '图像处理超时，请重试' : '图像处理失败，请稍后重试'
+        return error.message === '命令执行超时' ? '图像处理超时，请重试' : `图像处理失败：${error.message}`
       })
     })
 
@@ -1362,16 +1386,11 @@ export function apply(ctx: Context, config: Config) {
             activeTasks.delete(userId)
             logger.error('图片合成失败', { userId, error })
 
-            // 如果是明确的错误信息（如内容策略拦截），直接返回
-            if (error?.message && (
-              error.message.includes('内容被安全策略拦截') ||
-              error.message.includes('生成失败') ||
-              error.message.includes('处理失败')
-            )) {
-              return error.message
+            // 直接返回错误信息
+            if (error?.message) {
+              return `图片合成失败：${error.message}`
             }
 
-            // 不返回具体错误信息，避免泄露API密钥或其他敏感信息
             return '图片合成失败，请稍后重试'
           }
         })(),
@@ -1382,7 +1401,7 @@ export function apply(ctx: Context, config: Config) {
         const userId = session.userId
         if (userId) activeTasks.delete(userId)
         logger.error('图片合成超时或失败', { userId, error })
-        return error.message === '命令执行超时' ? '图片合成超时，请重试' : '图片合成失败，请稍后重试'
+        return error.message === '命令执行超时' ? '图片合成超时，请重试' : `图片合成失败：${error.message}`
       })
     })
 
