@@ -15,6 +15,7 @@ const COMMANDS = {
   PIXELATE: '变像素',
   QUERY_QUOTA: '图像额度',
   RECHARGE: '图像充值',
+  RECHARGE_ALL: '活动充值',
   RECHARGE_HISTORY: '图像充值记录',
   FUNCTION_LIST: '图像功能',
   IMAGE_COMMANDS: '图像指令'
@@ -100,7 +101,7 @@ export interface Config {
 export interface RechargeRecord {
   id: string
   timestamp: string
-  type: 'single' | 'batch'
+  type: 'single' | 'batch' | 'all'
   operator: {
     userId: string
     userName: string
@@ -422,6 +423,7 @@ export function apply(ctx: Context, config: Config) {
     // 管理员指令
     adminCommands: [
       { name: COMMANDS.RECHARGE, description: '为用户充值次数（仅管理员）' },
+      { name: COMMANDS.RECHARGE_ALL, description: '为所有用户充值次数（活动派发，仅管理员）' },
       { name: COMMANDS.RECHARGE_HISTORY, description: '查看充值历史记录（仅管理员）' }
     ]
   }
@@ -1398,6 +1400,101 @@ export function apply(ctx: Context, config: Config) {
       } catch (error) {
         logger.error('充值操作失败', error)
         return '充值失败，请稍后重试'
+      }
+    })
+
+  // 全员活动充值命令
+  ctx.command(`${COMMANDS.RECHARGE_ALL} [content:text]`, '为所有用户充值次数（活动派发，仅管理员）')
+    .action(async ({ session }, content) => {
+      if (!session?.userId) return '会话无效'
+
+      // 检查管理员权限
+      if (!isAdmin(session.userId)) {
+        return '权限不足，仅管理员可操作'
+      }
+
+      // 获取要解析的内容
+      const inputContent = content || await getPromptInput(session, '请输入活动充值信息，格式：\n充值次数 [备注]\n例如：20 或 20 春节活动奖励')
+      if (!inputContent) return '输入超时或无效'
+
+      // 解析输入内容
+      const elements = h.parse(inputContent)
+      const textElements = h.select(elements, 'text')
+      const text = textElements.map(el => el.attrs.content).join(' ').trim()
+
+      // 解析充值次数和备注
+      const parts = text.split(/\s+/).filter(p => p)
+      if (parts.length === 0) {
+        return '请输入充值次数，例如：图像活动充值 20 或 图像活动充值 20 活动名称'
+      }
+
+      const amount = parseInt(parts[0])
+      const note = parts.slice(1).join(' ') || '活动充值'
+
+      if (!amount || amount <= 0) {
+        return '充值次数必须大于0'
+      }
+
+      try {
+        const usersData = await loadUsersData()
+        const rechargeHistory = await loadRechargeHistory()
+        const now = new Date().toISOString()
+        const recordId = `recharge_all_${now.replace(/[-:T.]/g, '').slice(0, 14)}_${Math.random().toString(36).substr(2, 3)}`
+
+        const allUserIds = Object.keys(usersData).filter(userId => userId && usersData[userId])
+
+        if (allUserIds.length === 0) {
+          return '当前没有使用过插件的用户，无法进行活动充值'
+        }
+
+        const targets = []
+
+        // 为所有用户充值
+        for (const userId of allUserIds) {
+          if (!userId) continue
+
+          const userData = usersData[userId]
+          const userName = userData.userName || userId
+          const beforeBalance = userData.remainingPurchasedCount
+
+          userData.purchasedCount += amount
+          userData.remainingPurchasedCount += amount
+
+          targets.push({
+            userId,
+            userName,
+            amount,
+            beforeBalance,
+            afterBalance: userData.remainingPurchasedCount
+          })
+        }
+
+        // 保存用户数据
+        await saveUsersData(usersData)
+
+        // 记录充值历史
+        const record: RechargeRecord = {
+          id: recordId,
+          timestamp: now,
+          type: 'all',
+          operator: {
+            userId: session.userId,
+            userName: session.username || session.userId
+          },
+          targets,
+          totalAmount: amount * allUserIds.length,
+          note: note || '活动充值',
+          metadata: { all: true }
+        }
+
+        rechargeHistory.records.push(record)
+        await saveRechargeHistory(rechargeHistory)
+
+        return `✅ 活动充值成功\n目标用户数：${allUserIds.length}人\n充值次数：${amount}次/人\n总充值：${record.totalAmount}次\n操作员：${record.operator.userName}\n备注：${record.note}`
+
+      } catch (error) {
+        logger.error('活动充值操作失败', error)
+        return '活动充值失败，请稍后重试'
       }
     })
 
