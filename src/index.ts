@@ -7,8 +7,9 @@ export const name = 'aka-ai-generator'
 
 // 命令名称常量
 const COMMANDS = {
-  GENERATE_IMAGE: '生成图像',
-  COMPOSE_IMAGE: '合成图像',
+  IMG_TO_IMG: '图生图',
+  TXT_TO_IMG: '文生图',
+  COMPOSE_IMAGE: '合成图',
   CHANGE_POSE: '改姿势',
   OPTIMIZE_DESIGN: '修改设计',
   PIXELATE: '变像素',
@@ -19,7 +20,7 @@ const COMMANDS = {
   IMAGE_COMMANDS: '图像指令'
 } as const
 
-export type ImageProvider = 'yunwu' | 'gptgod'
+export type ImageProvider = 'yunwu' | 'gptgod' | 'gemini'
 
 export interface ModelMappingConfig {
   suffix: string
@@ -30,7 +31,6 @@ export interface ModelMappingConfig {
 export interface StyleConfig {
   commandName: string
   prompt: string
-  mode?: 'single' | 'multiple'
 }
 
 export interface StyleGroupConfig {
@@ -80,6 +80,9 @@ export interface Config {
   yunwuModelId: string
   gptgodApiKey: string
   gptgodModelId: string
+  geminiApiKey: string
+  geminiModelId: string
+  geminiApiBase: string
   modelMappings?: ModelMappingConfig[]
   apiTimeout: number
   commandTimeout: number
@@ -122,12 +125,8 @@ export interface RechargeHistory {
 }
 
 const StyleItemSchema = Schema.object({
-  commandName: Schema.string().required().description('命令名称（不含前缀斜杠）'),
-  prompt: Schema.string().role('textarea', { rows: 4 }).required().description('生成 prompt'),
-  mode: Schema.union([
-    Schema.const('single').description('单图模式'),
-    Schema.const('multiple').description('多图模式')
-  ]).default('single').description('图片输入模式')
+  commandName: Schema.string().required().description('命令名称').role('table-cell', { width: 100 }),
+  prompt: Schema.string().role('textarea', { rows: 4 }).required().description('生成 prompt')
 })
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -135,6 +134,7 @@ export const Config: Schema<Config> = Schema.intersect([
     provider: Schema.union([
       Schema.const('yunwu').description('云雾 Gemini 服务'),
       Schema.const('gptgod').description('GPTGod 服务'),
+      Schema.const('gemini').description('Google Gemini 原生'),
     ] as const)
       .default('yunwu' as ImageProvider)
       .description('图像生成供应商'),
@@ -142,11 +142,15 @@ export const Config: Schema<Config> = Schema.intersect([
     yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
     gptgodApiKey: Schema.string().description('GPTGod API 密钥').role('secret').default(''),
     gptgodModelId: Schema.string().default('nano-banana').description('GPTGod 模型ID'),
+    geminiApiKey: Schema.string().description('Gemini API 密钥').role('secret').default(''),
+    geminiModelId: Schema.string().default('gemini-2.5-flash').description('Gemini 模型ID'),
+    geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').description('Gemini API 基础地址'),
     modelMappings: Schema.array(Schema.object({
       suffix: Schema.string().required().description('指令后缀（例如 4K，对应输入 -4K）'),
       provider: Schema.union([
         Schema.const('yunwu').description('云雾 Gemini 服务'),
         Schema.const('gptgod').description('GPTGod 服务'),
+        Schema.const('gemini').description('Google Gemini 原生'),
       ] as const).description('可选：覆盖供应商'),
       modelId: Schema.string().required().description('触发该后缀时使用的模型 ID')
     })).role('table').default([]).description('根据 -后缀切换模型/供应商'),
@@ -198,13 +202,11 @@ export const Config: Schema<Config> = Schema.intersect([
     styles: Schema.array(StyleItemSchema).role('table').default([
       {
         commandName: '变手办',
-        prompt: '将这张照片变成手办模型。在它后面放置一个印有图像主体的盒子，桌子上有一台电脑显示Blender建模过程。在盒子前面添加一个圆形塑料底座，角色手办站在上面。如果可能的话，将场景设置在室内',
-        mode: 'single'
+        prompt: '将这张照片变成手办模型。在它后面放置一个印有图像主体的盒子，桌子上有一台电脑显示Blender建模过程。在盒子前面添加一个圆形塑料底座，角色手办站在上面。如果可能的话，将场景设置在室内'
       },
       {
         commandName: '变写实',
-        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征与姿态不变的前提下，生成一张照片级真实感的超写实摄影作品。要求：1. 采用专业相机拍摄（如佳能EOS R5），使用85mm f/1.4人像镜头，呈现柯达Portra 400胶片质感，8K超高清画质，HDR高动态范围，电影级打光效果；2. 画面应具有照片级真实感、超现实主义风格和高细节表现，确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界；3. 使用自然光影营造真实氛围，呈现raw and natural的原始自然感，具有authentic film snapshot的真实胶片质感；4. 整体需具备tactile feel触感质感和simulated texture模拟纹理细节，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素；5. 整体效果需像专业摄影棚拍摄的真实照片，具有电影级画质；6. 如果主体是人物脸部，脸部生成效果应参考欧美混血白人精致美丽帅气英俊的外观特征进行生成，保持精致立体的五官轮廓、健康光泽的肌肤质感、优雅的气质和自然的表情，确保面部特征协调美观。',
-        mode: 'single'
+        prompt: '请根据用户提供的图片，在严格保持主体身份、外观特征与姿态不变的前提下，生成一张照片级真实感的超写实摄影作品。要求：1. 采用专业相机拍摄（如佳能EOS R5），使用85mm f/1.4人像镜头，呈现柯达Portra 400胶片质感，8K超高清画质，HDR高动态范围，电影级打光效果；2. 画面应具有照片级真实感、超现实主义风格和高细节表现，确保光影、皮肤质感、服饰纹理与背景环境都贴近真实世界；3. 使用自然光影营造真实氛围，呈现raw and natural的原始自然感，具有authentic film snapshot的真实胶片质感；4. 整体需具备tactile feel触感质感和simulated texture模拟纹理细节，可以适度优化噪点与瑕疵，但不要改变主体特征或添加额外元素；5. 整体效果需像专业摄影棚拍摄的真实照片，具有电影级画质；6. 如果主体是人物脸部，脸部生成效果应参考欧美混血白人精致美丽帅气英俊的外观特征进行生成，保持精致立体的五官轮廓、健康光泽的肌肤质感、优雅的气质和自然的表情，确保面部特征协调美观。'
       },
     ]).description('自定义风格命令配置')
   }),
@@ -234,6 +236,9 @@ export function apply(ctx: Context, config: Config) {
         yunwuModelId: providerType === 'yunwu' ? (modelId || config.yunwuModelId) : config.yunwuModelId,
         gptgodApiKey: config.gptgodApiKey,
         gptgodModelId: providerType === 'gptgod' ? (modelId || config.gptgodModelId) : config.gptgodModelId,
+        geminiApiKey: config.geminiApiKey,
+        geminiModelId: providerType === 'gemini' ? (modelId || config.geminiModelId) : config.geminiModelId,
+        geminiApiBase: config.geminiApiBase,
         apiTimeout: config.apiTimeout,
         logLevel: config.logLevel,
         logger,
@@ -251,47 +256,6 @@ export function apply(ctx: Context, config: Config) {
     return value?.replace(/^\-+/, '').trim().toLowerCase()
   }
 
-  /**
-   * 从 prompt 文本中解析生成图片数量
-   * 支持的模式：生成X张、X张图片、生成 X 张、X张等
-   * @param prompt 原始 prompt 文本
-   * @returns { numImages: number | undefined, cleanedPrompt: string } 解析出的数量和清理后的 prompt
-   */
-  function parseNumImagesFromPrompt(prompt: string): { numImages: number | undefined, cleanedPrompt: string } {
-    if (!prompt || typeof prompt !== 'string') {
-      return { numImages: undefined, cleanedPrompt: prompt }
-    }
-
-    // 匹配模式：生成X张、X张图片、生成 X 张、X张等（X 为 1-4）
-    const patterns = [
-      /生成\s*([1-4])\s*张(?:图片)?/i,
-      /([1-4])\s*张(?:图片)?/,
-      /生成\s*([1-4])\s*个(?:图片)?/i,
-      /([1-4])\s*个(?:图片)?/,
-      /num[:\s]*([1-4])/i,
-      /数量[:\s]*([1-4])/i
-    ]
-
-    let numImages: number | undefined = undefined
-    let cleanedPrompt = prompt
-
-    for (const pattern of patterns) {
-      const match = prompt.match(pattern)
-      if (match) {
-        const num = parseInt(match[1], 10)
-        if (num >= 1 && num <= 4) {
-          numImages = num
-          // 移除匹配到的文本，保留其他内容
-          cleanedPrompt = prompt.replace(pattern, '').trim()
-          // 清理多余的空格和标点
-          cleanedPrompt = cleanedPrompt.replace(/\s+/g, ' ').replace(/[，,]\s*$/, '').trim()
-          break
-        }
-      }
-    }
-
-    return { numImages, cleanedPrompt }
-  }
 
   function buildModelMappingIndex(mappings?: ModelMappingConfig[]) {
     const map = new Map<string, ModelMappingConfig>()
@@ -450,7 +414,8 @@ export function apply(ctx: Context, config: Config) {
     // 非管理员指令（包含动态风格指令）
     userCommands: [
       ...getStyleCommands(),
-      { name: COMMANDS.GENERATE_IMAGE, description: '使用自定义prompt进行图像处理' },
+      { name: COMMANDS.TXT_TO_IMG, description: '根据文字描述生成图像' },
+      { name: COMMANDS.IMG_TO_IMG, description: '使用自定义prompt进行图像处理（图生图）' },
       { name: COMMANDS.COMPOSE_IMAGE, description: '合成多张图片，使用自定义prompt控制合成效果' },
       { name: COMMANDS.QUERY_QUOTA, description: '查询用户额度信息' }
     ],
@@ -781,10 +746,29 @@ export function apply(ctx: Context, config: Config) {
   }
 
 
-  // 获取输入数据（支持单图/多图）
-  async function getInputData(session: Session, imgParam: any, mode: 'single' | 'multiple'): Promise<{ images: string[], text?: string } | { error: string }> {
+  // 获取输入数据（支持单图/多图/纯文本）
+  async function getInputData(session: Session, imgParam: any, mode: 'single' | 'multiple' | 'text'): Promise<{ images: string[], text?: string } | { error: string }> {
     const collectedImages: string[] = []
     let collectedText = ''
+
+    // 0. 纯文本模式处理
+    if (mode === 'text') {
+      // 如果参数是字符串，直接作为 text
+      if (typeof imgParam === 'string' && imgParam.trim()) {
+        return { images: [], text: imgParam.trim() }
+      }
+      
+      // 交互式获取
+      await session.send('请输入画面描述')
+      const msg = await session.prompt(30000)
+      if (!msg) return { error: '等待超时' }
+      
+      const elements = h.parse(msg)
+      const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
+      
+      if (!text) return { error: '未检测到描述' }
+      return { images: [], text }
+    }
 
     // 1. 从命令参数获取
     if (imgParam) {
@@ -810,7 +794,7 @@ export function apply(ctx: Context, config: Config) {
     if (collectedImages.length > 0) {
       if (mode === 'single') {
         if (collectedImages.length > 1) {
-          return { error: '本功能仅支持处理一张图片，检测到多张图片。如需合成多张图片请使用"合成图像"命令' }
+          return { error: '本功能仅支持处理一张图片，检测到多张图片。如需合成多张图片请使用"合成图"命令' }
         }
         return { images: collectedImages }
       }
@@ -882,7 +866,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 带超时的通用图像处理函数
-  async function processImageWithTimeout(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, mode: 'single' | 'multiple' = 'single') {
+  async function processImageWithTimeout(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, mode: 'single' | 'multiple' | 'text' = 'single') {
     return Promise.race([
       processImage(session, img, prompt, styleName, requestContext, displayInfo, mode),
       new Promise<string>((_, reject) =>
@@ -897,7 +881,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 通用图像处理函数
-  async function processImage(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, mode: 'single' | 'multiple' = 'single') {
+  async function processImage(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, mode: 'single' | 'multiple' | 'text' = 'single') {
     const userId = session.userId
 
     // 检查是否已有任务进行
@@ -924,6 +908,16 @@ export function apply(ctx: Context, config: Config) {
     let finalPrompt = prompt
     if (extraText) {
       finalPrompt += ' ' + extraText
+    }
+    finalPrompt = finalPrompt.trim()
+
+    // 如果最终 prompt 为空（既没有预设 prompt，用户也没输入 prompt），则强制要求用户输入
+    if (!finalPrompt) {
+      const promptInput = await getPromptInput(session, '请发送画面描述')
+      if (!promptInput) {
+        return '未检测到描述，请重新发送'
+      }
+      finalPrompt = promptInput.trim()
     }
 
     const providerType = (requestContext?.provider || config.provider) as ProviderType
@@ -1008,6 +1002,7 @@ export function apply(ctx: Context, config: Config) {
       if (style.commandName && style.prompt) {
         ctx.command(`${style.commandName} [img:text]`, '图像风格转换')
           .option('num', '-n <num:number> 生成图片数量 (1-4)')
+          .option('multiple', '-m 允许多图输入')
           .action(async (argv, img) => {
             const { session, options } = argv
             if (!session?.userId) return '会话无效'
@@ -1024,22 +1019,8 @@ export function apply(ctx: Context, config: Config) {
             }
             const userPromptText = userPromptParts.join(' - ')
             
-            // 从用户输入中解析数量
-            let promptNumImages: number | undefined = undefined
-            let cleanedUserPrompt = userPromptText
-            if (userPromptText) {
-              const parsed = parseNumImagesFromPrompt(userPromptText)
-              if (parsed.numImages) {
-                promptNumImages = parsed.numImages
-                cleanedUserPrompt = parsed.cleanedPrompt
-                if (config.logLevel === 'debug') {
-                  logger.debug('从 prompt 中解析到生成数量', { numImages: promptNumImages, cleanedPrompt: cleanedUserPrompt })
-                }
-              }
-            }
-            
-            // 确定要生成的图片数量
-            const numImages = options?.num || promptNumImages || config.defaultNumImages
+            // 确定要生成的图片数量（仅使用 -n 参数）
+            const numImages = options?.num || config.defaultNumImages
 
             // 检查每日调用限制（传入实际要生成的图片数量）
             const limitCheck = await checkDailyLimit(session.userId!, numImages)
@@ -1047,10 +1028,10 @@ export function apply(ctx: Context, config: Config) {
               return limitCheck.message
             }
             
-            // 构建最终的 prompt（保留预设的 style.prompt，使用清理后的用户输入）
+            // 构建最终的 prompt（保留预设的 style.prompt，添加用户输入）
             const promptSegments = [style.prompt]
-            if (cleanedUserPrompt) {
-              promptSegments.push(cleanedUserPrompt)
+            if (userPromptText) {
+              promptSegments.push(userPromptText)
             }
             const mergedPrompt = promptSegments.filter(Boolean).join(' - ')
 
@@ -1074,7 +1055,7 @@ export function apply(ctx: Context, config: Config) {
               displayInfo.modelDescription = modifiers.modelMapping.suffix || modifiers.modelMapping.modelId
             }
 
-            const mode = style.mode || 'single'
+            const mode = options?.multiple ? 'multiple' : 'single'
             return processImageWithTimeout(session, img, mergedPrompt, style.commandName, requestContext, displayInfo, mode)
           })
 
@@ -1083,176 +1064,50 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  // 生成图像命令（自定义prompt）
-  ctx.command(COMMANDS.GENERATE_IMAGE, '使用自定义prompt进行图像处理')
+  // 文生图命令
+  ctx.command(`${COMMANDS.TXT_TO_IMG} [prompt:text]`, '根据文字描述生成图像')
     .option('num', '-n <num:number> 生成图片数量 (1-4)')
-    .action(async ({ session, options }) => {
+    .action(async ({ session, options }, prompt) => {
       if (!session?.userId) return '会话无效'
+      const numImages = options?.num || config.defaultNumImages
+      
+      // 检查每日调用限制
+      const limitCheck = await checkDailyLimit(session.userId!, numImages)
+      if (!limitCheck.allowed) {
+        return limitCheck.message
+      }
 
-      return Promise.race([
-        (async () => {
-          const userId = session.userId
-          if (!userId) return '会话无效'
-
-          // 检查是否已有任务进行
-          if (activeTasks.has(userId)) {
-            return '您有一个图像处理任务正在进行中，请等待完成'
-          }
-
-          // 等待用户发送图片和prompt
-          await session.send('图片+描述')
-
-          const collectedImages: string[] = []
-          let prompt = ''
-
-          // 循环接收消息，直到收到纯文字消息作为 prompt
-          while (true) {
-            const msg = await session.prompt(60000) // 60秒超时
-            if (!msg) {
-              return '等待超时，请重试'
-            }
-
-            const elements = h.parse(msg)
-            const images = h.select(elements, 'img')
-            const textElements = h.select(elements, 'text')
-            const text = textElements.map(el => el.attrs.content).join(' ').trim()
-
-            // 如果有图片，收集图片
-            if (images.length > 0) {
-              // 检查是否已经有图片
-              if (collectedImages.length > 0) {
-                return '本功能仅支持处理一张图片，如需合成多张图片请使用"合成图像"命令'
-              }
-
-              // 检查是否发送了多张图片
-              if (images.length > 1) {
-                return '本功能仅支持处理一张图片，检测到多张图片。如需合成多张图片请使用"合成图像"命令'
-              }
-
-              for (const img of images) {
-                collectedImages.push(img.attrs.src)
-              }
-
-              // 如果同时有文字，作为 prompt 并结束
-              if (text) {
-                prompt = text
-                break
-              }
-
-              // 只有图片，继续等待
-              await session.send('请发送描述')
-              continue
-            }
-
-            // 如果只有文字
-            if (text) {
-              if (collectedImages.length === 0) {
-                return '未检测到图片，请先发送图片'
-              }
-              prompt = text
-              break
-            }
-
-            // 既没有图片也没有文字
-            return '未检测到有效内容，请重新发送'
-          }
-
-          // 验证
-          if (collectedImages.length === 0) {
-            return '未检测到图片，请重新发送'
-          }
-
-          if (collectedImages.length > 1) {
-            return '本功能仅支持处理一张图片，检测到多张图片。如需合成多张图片请使用"合成图像"命令'
-          }
-
-          if (!prompt) {
-            return '未检测到prompt描述，请重新发送'
-          }
-
-          // 从 prompt 中解析生成数量
-          const { numImages: promptNumImages, cleanedPrompt } = parseNumImagesFromPrompt(prompt)
-          if (promptNumImages) {
-            prompt = cleanedPrompt
-            if (config.logLevel === 'debug') {
-              logger.debug('从 prompt 中解析到生成数量', { numImages: promptNumImages, cleanedPrompt })
-            }
-          }
-
-          const imageUrl = collectedImages[0]
-          const imageCount = options?.num || promptNumImages || config.defaultNumImages
-
-          // 验证参数
-          if (imageCount < 1 || imageCount > 4) {
-            return '生成数量必须在 1-4 之间'
-          }
-
-          // 检查每日调用限制（传入实际要生成的图片数量）
-          const limitCheck = await checkDailyLimit(userId, imageCount)
-          if (!limitCheck.allowed) {
-            return limitCheck.message
-          }
-
-          logger.info('开始自定义图像处理', {
-            userId,
-            imageUrl,
-            prompt,
-            numImages: imageCount
-          })
-
-          // 调用图像编辑API
-          await session.send(`开始处理图片（自定义prompt）...\nPrompt: ${prompt}`)
-
-          try {
-            activeTasks.set(userId, 'processing')
-
-            const resultImages = await requestProviderImages(prompt, imageUrl, imageCount)
-
-            if (resultImages.length === 0) {
-              activeTasks.delete(userId)
-              return '图像处理失败：未能生成图片'
-            }
-
-            await session.send('图像处理完成！')
-
-            // 发送生成的图片
-            for (let i = 0; i < resultImages.length; i++) {
-              await session.send(h.image(resultImages[i]))
-
-              if (resultImages.length > 1 && i < resultImages.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1000))
-              }
-            }
-
-            // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
-            await recordUserUsage(session, COMMANDS.GENERATE_IMAGE, resultImages.length)
-
-            activeTasks.delete(userId)
-
-          } catch (error: any) {
-            activeTasks.delete(userId)
-            logger.error('自定义图像处理失败', { userId, error })
-
-            // 直接返回错误信息
-            if (error?.message) {
-              return `图像处理失败：${error.message}`
-            }
-
-            return '图像处理失败，请稍后重试'
-          }
-        })(),
-        new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('命令执行超时')), config.commandTimeout * 1000)
-        )
-      ]).catch(error => {
-        const userId = session.userId
-        if (userId) activeTasks.delete(userId)
-        logger.error('自定义图像处理超时或失败', { userId, error })
-        return error.message === '命令执行超时' ? '图像处理超时，请重试' : `图像处理失败：${error.message}`
-      })
+      const requestContext: ImageRequestContext = {
+        numImages: numImages
+      }
+      
+      return processImageWithTimeout(session, prompt, '', COMMANDS.TXT_TO_IMG, requestContext, {}, 'text')
     })
 
-  // 合成图像命令（多张图片合成）
+  // 图生图命令（自定义prompt）
+  ctx.command(`${COMMANDS.IMG_TO_IMG} [img:text]`, '使用自定义prompt进行图像处理')
+    .option('num', '-n <num:number> 生成图片数量 (1-4)')
+    .option('multiple', '-m 允许多图输入')
+    .action(async ({ session, options }, img) => {
+      if (!session?.userId) return '会话无效'
+      const numImages = options?.num || config.defaultNumImages
+      const mode = options?.multiple ? 'multiple' : 'single'
+
+      // 检查每日调用限制
+      const limitCheck = await checkDailyLimit(session.userId!, numImages)
+      if (!limitCheck.allowed) {
+        return limitCheck.message
+      }
+
+      const requestContext: ImageRequestContext = {
+        numImages: numImages
+      }
+
+      // 使用通用处理函数，prompt 为空字符串，让其通过交互或 img 参数获取
+      return processImageWithTimeout(session, img, '', COMMANDS.IMG_TO_IMG, requestContext, {}, mode)
+    })
+
+  // 合成图命令（多张图片合成）
   ctx.command(COMMANDS.COMPOSE_IMAGE, '合成多张图片，使用自定义prompt控制合成效果')
     .option('num', '-n <num:number> 生成图片数量 (1-4)')
     .action(async ({ session, options }) => {
@@ -1325,16 +1180,7 @@ export function apply(ctx: Context, config: Config) {
             return '未检测到prompt描述，请重新发送'
           }
 
-          // 从 prompt 中解析生成数量
-          const { numImages: promptNumImages, cleanedPrompt } = parseNumImagesFromPrompt(prompt)
-          if (promptNumImages) {
-            prompt = cleanedPrompt
-            if (config.logLevel === 'debug') {
-              logger.debug('从 prompt 中解析到生成数量', { numImages: promptNumImages, cleanedPrompt })
-            }
-          }
-
-          const imageCount = options?.num || promptNumImages || config.defaultNumImages
+          const imageCount = options?.num || config.defaultNumImages
 
           // 验证参数
           if (imageCount < 1 || imageCount > 4) {
@@ -1356,7 +1202,7 @@ export function apply(ctx: Context, config: Config) {
           })
 
           // 调用图像编辑API（支持多张图片）
-          await session.send(`开始合成图像（${collectedImages.length}张）...\nPrompt: ${prompt}`)
+          await session.send(`开始合成图（${collectedImages.length}张）...\nPrompt: ${prompt}`)
 
           try {
             activeTasks.set(userId, 'processing')

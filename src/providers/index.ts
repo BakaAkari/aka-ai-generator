@@ -1,8 +1,9 @@
 import { ImageProvider } from './types'
 import { YunwuProvider, YunwuConfig } from './yunwu'
 import { GptGodProvider, GptGodConfig } from './gptgod'
+import { GeminiProvider, GeminiConfig } from './gemini'
 
-export type ProviderType = 'yunwu' | 'gptgod'
+export type ProviderType = 'yunwu' | 'gptgod' | 'gemini'
 
 export interface ProviderFactoryConfig {
   provider: ProviderType
@@ -10,6 +11,9 @@ export interface ProviderFactoryConfig {
   yunwuModelId: string
   gptgodApiKey: string
   gptgodModelId: string
+  geminiApiKey: string
+  geminiModelId: string
+  geminiApiBase: string
   apiTimeout: number
   logLevel: 'info' | 'debug'
   logger: any
@@ -40,6 +44,17 @@ export function createImageProvider(config: ProviderFactoryConfig): ImageProvide
         logger: config.logger,
         ctx: config.ctx
       })
+
+    case 'gemini':
+      return new GeminiProvider({
+        apiKey: config.geminiApiKey,
+        modelId: config.geminiModelId,
+        apiBase: config.geminiApiBase,
+        apiTimeout: config.apiTimeout,
+        logLevel: config.logLevel,
+        logger: config.logger,
+        ctx: config.ctx
+      })
     
     default:
       throw new Error(`不支持的供应商类型: ${config.provider}`)
@@ -49,4 +64,5 @@ export function createImageProvider(config: ProviderFactoryConfig): ImageProvide
 export { ImageProvider } from './types'
 export { YunwuProvider } from './yunwu'
 export { GptGodProvider } from './gptgod'
+export { GeminiProvider } from './gemini'
 
