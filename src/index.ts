@@ -760,14 +760,25 @@ export function apply(ctx: Context, config: Config) {
       
       // 交互式获取
       await session.send('请输入画面描述')
-      const msg = await session.prompt(30000)
-      if (!msg) return { error: '等待超时' }
-      
-      const elements = h.parse(msg)
-      const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
-      
-      if (!text) return { error: '未检测到描述' }
-      return { images: [], text }
+      while (true) {
+        const msg = await session.prompt(30000)
+        if (!msg) return { error: '等待超时' }
+        
+        const elements = h.parse(msg)
+        const images = h.select(elements, 'img')
+        if (images.length > 0) {
+          await session.send('检测到图片，请发送文字描述')
+          continue
+        }
+
+        const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
+        
+        if (!text) {
+          await session.send('未检测到描述，请重新发送')
+          continue
+        }
+        return { images: [], text }
+      }
     }
 
     // 1. 从命令参数获取
@@ -913,11 +924,25 @@ export function apply(ctx: Context, config: Config) {
 
     // 如果最终 prompt 为空（既没有预设 prompt，用户也没输入 prompt），则强制要求用户输入
     if (!finalPrompt) {
-      const promptInput = await getPromptInput(session, '请发送画面描述')
-      if (!promptInput) {
-        return '未检测到描述，请重新发送'
+      await session.send('请发送画面描述')
+      while (true) {
+        const promptMsg = await session.prompt(30000)
+        if (!promptMsg) {
+          return '未检测到描述，请重新发送'
+        }
+        const elements = h.parse(promptMsg)
+        const images = h.select(elements, 'img')
+        if (images.length > 0) {
+          await session.send('检测到图片，请发送文字描述')
+          continue
+        }
+        const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
+        if (text) {
+          finalPrompt = text
+          break
+        }
+        await session.send('未检测到有效文字描述，请重新发送')
       }
-      finalPrompt = promptInput.trim()
     }
 
     const providerType = (requestContext?.provider || config.provider) as ProviderType
