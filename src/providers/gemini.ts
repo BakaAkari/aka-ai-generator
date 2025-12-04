@@ -46,12 +46,84 @@ async function downloadImageAsBase64(
 /**
  * 解析 Gemini 响应，提取图片 URL
  */
-function parseGeminiResponse(response: any): string[] {
+function parseGeminiResponse(response: any, logger?: any): string[] {
   try {
     const images: string[] = []
     
+    // 检查响应结构
+    if (!response) {
+      logger?.error('Gemini API 响应为空')
+      return []
+    }
+    
+    // 检查是否有错误信息
+    if (response.error) {
+      logger?.error('Gemini API 返回错误', { error: response.error })
+      throw new Error(`Gemini API 错误: ${response.error.message || JSON.stringify(response.error)}`)
+    }
+    
+    // 检查 promptFeedback，如果请求被阻止，响应中可能没有 candidates
+    if (response.promptFeedback) {
+      const blockReason = response.promptFeedback.blockReason
+      const safetyRatings = response.promptFeedback.safetyRatings
+      
+      if (blockReason) {
+        logger?.error('Gemini API 请求被阻止', { 
+          blockReason, 
+          safetyRatings,
+          blockReasonMessage: response.promptFeedback.blockReasonMessage 
+        })
+        
+        // 根据不同的 blockReason 提供更详细的错误信息
+        let errorMessage = '请求被 Gemini API 阻止'
+        
+        switch (blockReason) {
+          case 'SAFETY':
+            errorMessage = '内容被安全策略阻止，可能包含不安全的内容'
+            break
+          case 'OTHER':
+            errorMessage = '请求被阻止（原因：OTHER），可能是内容不符合使用政策或模型无法处理'
+            if (response.promptFeedback.blockReasonMessage) {
+              errorMessage += `：${response.promptFeedback.blockReasonMessage}`
+            }
+            break
+          case 'RECITATION':
+            errorMessage = '内容包含受版权保护的内容'
+            break
+          default:
+            errorMessage = `请求被阻止（原因：${blockReason}）`
+        }
+        
+        // 如果有安全评分信息，添加到错误消息中
+        if (safetyRatings && Array.isArray(safetyRatings) && safetyRatings.length > 0) {
+          const ratings = safetyRatings.map((r: any) => `${r.category}:${r.probability}`).join(', ')
+          errorMessage += ` [安全评分: ${ratings}]`
+        }
+        
+        throw new Error(errorMessage)
+      }
+    }
+    
     if (response.candidates && response.candidates.length > 0) {
       for (const candidate of response.candidates) {
+        // 检查 finishReason，如果是 STOP 以外的值可能有错误
+        if (candidate.finishReason && candidate.finishReason !== 'STOP') {
+          logger?.warn('Gemini 响应 finishReason 异常', { 
+            finishReason: candidate.finishReason,
+            safetyRatings: candidate.safetyRatings 
+          })
+          
+          // 如果是因为安全原因被阻止，抛出明确的错误
+          if (candidate.finishReason === 'SAFETY' || candidate.finishReason === 'RECITATION') {
+            throw new Error(`内容被阻止: ${candidate.finishReason}，可能包含不安全的内容`)
+          }
+          
+          // 如果是其他原因（如最大token数），也记录警告
+          if (candidate.finishReason !== 'MAX_TOKENS') {
+            logger?.warn('Gemini 响应可能不完整', { finishReason: candidate.finishReason })
+          }
+        }
+        
         if (candidate.content && candidate.content.parts) {
           for (const part of candidate.content.parts) {
             // 检查是否有 inlineData（Base64 图片，驼峰命名）
@@ -60,6 +132,7 @@ function parseGeminiResponse(response: any): string[] {
               const mimeType = part.inlineData.mimeType || 'image/jpeg'
               const dataUrl = `data:${mimeType};base64,${base64Data}`
               images.push(dataUrl)
+              logger?.debug('从响应中提取到图片 (inlineData)', { mimeType, dataLength: base64Data.length })
             }
             // 兼容下划线命名
             else if (part.inline_data && part.inline_data.data) {
@@ -67,19 +140,60 @@ function parseGeminiResponse(response: any): string[] {
               const mimeType = part.inline_data.mime_type || 'image/jpeg'
               const dataUrl = `data:${mimeType};base64,${base64Data}`
               images.push(dataUrl)
+              logger?.debug('从响应中提取到图片 (inline_data)', { mimeType, dataLength: base64Data.length })
             }
             // 检查是否有 fileData（文件引用）
             else if (part.fileData && part.fileData.fileUri) {
               images.push(part.fileData.fileUri)
+              logger?.debug('从响应中提取到图片 (fileData)', { fileUri: part.fileData.fileUri })
+            }
+            // 如果 part 只有 text，说明没有生成图片
+            else if (part.text) {
+              logger?.warn('响应中包含文本而非图片', { text: part.text.substring(0, 100) })
             }
           }
+        } else {
+          logger?.warn('候选响应中没有 content.parts', { candidate: JSON.stringify(candidate).substring(0, 200) })
         }
+      }
+    } else {
+      // 如果没有 candidates，检查是否有其他有用的信息
+      const hasPromptFeedback = !!response.promptFeedback
+      const responseKeys = Object.keys(response)
+      
+      logger?.error('Gemini API 响应中没有 candidates', { 
+        response: JSON.stringify(response).substring(0, 500),
+        hasPromptFeedback,
+        responseKeys 
+      })
+      
+      // 如果没有 promptFeedback 也没有 candidates，这是异常情况
+      if (!hasPromptFeedback) {
+        throw new Error('Gemini API 响应格式异常：既没有生成内容也没有反馈信息')
+      }
+      
+      // 如果有 promptFeedback 但没有 blockReason，也可能有问题
+      if (hasPromptFeedback && !response.promptFeedback.blockReason) {
+        logger?.warn('有 promptFeedback 但没有 blockReason，也没有 candidates', {
+          promptFeedback: response.promptFeedback
+        })
       }
     }
     
+    if (images.length === 0) {
+      logger?.error('未能从 Gemini API 响应中提取到任何图片', {
+        hasCandidates: !!response.candidates,
+        candidatesCount: response.candidates?.length || 0,
+        responseKeys: Object.keys(response),
+        firstCandidate: response.candidates?.[0] ? JSON.stringify(response.candidates[0]).substring(0, 300) : null,
+        promptFeedback: response.promptFeedback ? JSON.stringify(response.promptFeedback) : null
+      })
+    }
+    
     return images
-  } catch (error) {
-    return []
+  } catch (error: any) {
+    logger?.error('解析 Gemini 响应时出错', { error: error.message, stack: error.stack })
+    throw error // 重新抛出错误，让上层处理
   }
 }
 
@@ -91,15 +205,24 @@ export class GeminiProvider implements ImageProvider {
   }
 
   async generateImages(prompt: string, imageUrls: string | string[], numImages: number): Promise<string[]> {
-    const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls]
+    // 处理空数组或空字符串的情况
+    let urls: string[] = []
+    if (Array.isArray(imageUrls)) {
+      urls = imageUrls.filter(url => url && typeof url === 'string' && url.trim())
+    } else if (imageUrls && typeof imageUrls === 'string' && imageUrls.trim()) {
+      urls = [imageUrls]
+    }
+    
     const logger = this.config.logger
     const ctx = this.config.ctx
     
-    logger.debug('开始下载图片并转换为Base64', { urls })
+    logger.debug('开始处理图片输入', { urls, promptLength: prompt.length, isTextToImage: urls.length === 0 })
     
     // 下载所有图片并转换为 Base64
     const imageParts = []
     for (const url of urls) {
+      if (!url || !url.trim()) continue
+      
       const { data, mimeType } = await downloadImageAsBase64(
         ctx,
         url,
@@ -155,15 +278,28 @@ export class GeminiProvider implements ImageProvider {
           }
         )
         
-        const images = parseGeminiResponse(response)
-        allImages.push(...images)
+        const images = parseGeminiResponse(response, logger)
         
-        logger.success('Gemini API 调用成功', { current: i + 1, total: numImages })
+        if (images.length === 0) {
+          // 即使解析到0张图片，也记录警告
+          logger.warn('Gemini API 调用成功但未解析到图片', { 
+            current: i + 1, 
+            total: numImages,
+            responseHasCandidates: !!response.candidates,
+            responseKeys: Object.keys(response)
+          })
+          // 继续执行，不立即抛出错误，等待循环结束后统一处理
+        } else {
+          logger.success('Gemini API 调用成功', { current: i + 1, total: numImages, imagesCount: images.length })
+        }
+        
+        allImages.push(...images)
       } catch (error: any) {
         logger.error('Gemini API 调用失败', { 
           message: error?.message || '未知错误',
           code: error?.code,
           status: error?.response?.status,
+          responseData: error?.response?.data ? JSON.stringify(error.response.data).substring(0, 500) : undefined,
           current: i + 1,
           total: numImages
         })
@@ -174,6 +310,12 @@ export class GeminiProvider implements ImageProvider {
         }
         throw new Error(`图像处理API调用失败: ${error?.message || '未知错误'}`)
       }
+    }
+    
+    // 如果最终没有生成任何图片，抛出明确的错误
+    if (allImages.length === 0) {
+      logger.error('所有 Gemini API 调用都未生成图片', { numImages })
+      throw new Error('未能从 Gemini API 生成图片，请检查 prompt 和模型配置')
     }
     
     return allImages

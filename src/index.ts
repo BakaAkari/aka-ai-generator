@@ -762,25 +762,22 @@ export function apply(ctx: Context, config: Config) {
       
       // 交互式获取
       await session.send('请输入画面描述')
-      while (true) {
-        const msg = await session.prompt(30000)
-        if (!msg) return { error: '等待超时' }
-        
-        const elements = h.parse(msg)
-        const images = h.select(elements, 'img')
-        if (images.length > 0) {
-          await session.send('检测到图片，请发送文字描述')
-          continue
-        }
-
-        const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
-        
-        if (!text) {
-          await session.send('未检测到描述，请重新发送')
-          continue
-        }
-        return { images: [], text }
+      
+      const msg = await session.prompt(30000)
+      if (!msg) return { error: '等待超时' }
+      
+      const elements = h.parse(msg)
+      const images = h.select(elements, 'img')
+      if (images.length > 0) {
+        return { error: '检测到图片，本功能仅支持文字输入' }
       }
+
+      const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
+      
+      if (!text) {
+        return { error: '未检测到描述，操作已取消' }
+      }
+      return { images: [], text }
     }
 
     // 1. 从命令参数获取
@@ -852,8 +849,7 @@ export function apply(ctx: Context, config: Config) {
 
       if (text) {
         if (collectedImages.length === 0) {
-          await session.send('未检测到图片，请先发送图片')
-          continue
+          return { error: '未检测到图片，请重新发起指令并发送图片' }
         }
         collectedText = text
         break
@@ -927,23 +923,21 @@ export function apply(ctx: Context, config: Config) {
     // 如果最终 prompt 为空（既没有预设 prompt，用户也没输入 prompt），则强制要求用户输入
     if (!finalPrompt) {
       await session.send('请发送画面描述')
-      while (true) {
-        const promptMsg = await session.prompt(30000)
-        if (!promptMsg) {
-          return '未检测到描述，请重新发送'
-        }
-        const elements = h.parse(promptMsg)
-        const images = h.select(elements, 'img')
-        if (images.length > 0) {
-          await session.send('检测到图片，请发送文字描述')
-          continue
-        }
-        const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
-        if (text) {
-          finalPrompt = text
-          break
-        }
-        await session.send('未检测到有效文字描述，请重新发送')
+      
+      const promptMsg = await session.prompt(30000)
+      if (!promptMsg) {
+        return '未检测到描述，操作已取消'
+      }
+      const elements = h.parse(promptMsg)
+      const images = h.select(elements, 'img')
+      if (images.length > 0) {
+        return '检测到图片，本功能仅支持文字输入'
+      }
+      const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
+      if (text) {
+        finalPrompt = text
+      } else {
+        return '未检测到有效文字描述，操作已取消'
       }
     }
 
@@ -1195,7 +1189,7 @@ export function apply(ctx: Context, config: Config) {
             }
 
             // 既没有图片也没有文字
-            return '未检测到有效内容，请重新发送'
+            return '未检测到有效内容，操作已取消'
           }
 
           // 验证
