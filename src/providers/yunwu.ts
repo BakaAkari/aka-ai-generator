@@ -1,4 +1,4 @@
-import { ImageProvider, ProviderConfig } from './types'
+import { ImageProvider, ProviderConfig, sanitizeError, sanitizeString } from './types'
 
 export interface YunwuConfig extends ProviderConfig {
   apiKey: string
@@ -155,8 +155,11 @@ export class YunwuProvider implements ImageProvider {
         
         logger.success('云雾图像编辑 API 调用成功', { current: i + 1, total: numImages })
       } catch (error: any) {
+        // 清理敏感信息后再记录日志
+        const safeMessage = typeof error?.message === 'string' ? sanitizeString(error.message) : '未知错误'
+        
         logger.error('云雾图像编辑 API 调用失败', { 
-          message: error?.message || '未知错误',
+          message: safeMessage,
           code: error?.code,
           status: error?.response?.status,
           current: i + 1,

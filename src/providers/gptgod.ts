@@ -1,4 +1,4 @@
-import { ImageProvider, ProviderConfig } from './types'
+import { ImageProvider, ProviderConfig, sanitizeError, sanitizeString } from './types'
 
 const GPTGOD_DEFAULT_API_URL = 'https://api.gptgod.online/v1/chat/completions'
 
@@ -475,23 +475,27 @@ export class GptGodProvider implements ImageProvider {
           }
 
           // 不可重试的错误或已达到最大重试次数
+          // 清理敏感信息后再记录日志
+          const sanitizedError = sanitizeError(error)
+          const safeMessage = typeof error?.message === 'string' ? sanitizeString(error.message) : '未知错误'
+          
           logger.error('GPTGod 图像编辑 API 调用失败', {
-            message: error?.message || '未知错误',
+            message: safeMessage,
             name: error?.name,
             code: error?.code,
             status: error?.response?.status,
             statusText: error?.response?.statusText,
-            data: error?.response?.data,
-            stack: error?.stack,
-            cause: error?.cause,
+            data: sanitizeError(error?.response?.data),
+            stack: sanitizeString(error?.stack || ''),
+            cause: sanitizeError(error?.cause),
             attempt,
             maxRetries,
             current: i + 1,
             total: numImages,
-            // 如果是 axios 错误，通常会有 config 和 request 信息
+            // 如果是 axios 错误，通常会有 config 和 request 信息（清理敏感信息）
             url: error?.config?.url,
             method: error?.config?.method,
-            headers: error?.config?.headers
+            headers: sanitizeError(error?.config?.headers)
           })
 
           // 根据错误类型返回更明确的错误信息

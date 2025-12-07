@@ -1,4 +1,4 @@
-import { ImageProvider, ProviderConfig } from './types'
+import { ImageProvider, ProviderConfig, sanitizeError, sanitizeString } from './types'
 
 export interface GeminiConfig extends ProviderConfig {
   apiKey: string
@@ -58,8 +58,12 @@ function parseGeminiResponse(response: any, logger?: any): string[] {
     
     // 检查是否有错误信息
     if (response.error) {
-      logger?.error('Gemini API 返回错误', { error: response.error })
-      throw new Error(`Gemini API 错误: ${response.error.message || JSON.stringify(response.error)}`)
+      const sanitizedError = sanitizeError(response.error)
+      logger?.error('Gemini API 返回错误', { error: sanitizedError })
+      // 先清理错误对象，再转换为字符串
+      const errorMessage = response.error.message || JSON.stringify(sanitizedError)
+      const safeMessage = sanitizeString(errorMessage)
+      throw new Error(`Gemini API 错误: ${safeMessage}`)
     }
     
     // 检查 promptFeedback，如果请求被阻止，响应中可能没有 candidates
@@ -192,8 +196,13 @@ function parseGeminiResponse(response: any, logger?: any): string[] {
     
     return images
   } catch (error: any) {
-    logger?.error('解析 Gemini 响应时出错', { error: error.message, stack: error.stack })
-    throw error // 重新抛出错误，让上层处理
+    const safeMessage = sanitizeString(error?.message || '未知错误')
+    const safeStack = sanitizeString(error?.stack || '')
+    logger?.error('解析 Gemini 响应时出错', { error: safeMessage, stack: safeStack })
+    // 重新抛出错误，但使用清理后的消息
+    const sanitizedError = new Error(safeMessage)
+    sanitizedError.name = error?.name || 'Error'
+    throw sanitizedError
   }
 }
 
@@ -295,11 +304,15 @@ export class GeminiProvider implements ImageProvider {
         
         allImages.push(...images)
       } catch (error: any) {
+        // 清理敏感信息后再记录日志
+        const sanitizedError = sanitizeError(error)
+        const safeMessage = typeof error?.message === 'string' ? sanitizeString(error.message) : '未知错误'
+        
         logger.error('Gemini API 调用失败', { 
-          message: error?.message || '未知错误',
+          message: safeMessage,
           code: error?.code,
           status: error?.response?.status,
-          responseData: error?.response?.data ? JSON.stringify(error.response.data).substring(0, 500) : undefined,
+          responseData: error?.response?.data ? sanitizeString(JSON.stringify(error.response.data).substring(0, 500)) : undefined,
           current: i + 1,
           total: numImages
         })
@@ -308,7 +321,7 @@ export class GeminiProvider implements ImageProvider {
           logger.warn('部分图片生成失败，返回已生成的图片', { generated: allImages.length, requested: numImages })
           break
         }
-        throw new Error(`图像处理API调用失败: ${error?.message || '未知错误'}`)
+        throw new Error(`图像处理API调用失败: ${safeMessage}`)
       }
     }
     

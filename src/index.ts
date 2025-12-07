@@ -2,6 +2,7 @@ import { Context, Schema, h, Session, Argv } from 'koishi'
 import { existsSync, mkdirSync, promises as fs } from 'fs'
 import { join } from 'path'
 import { createImageProvider, ImageProvider as IImageProvider, ProviderType } from './providers'
+import { sanitizeError, sanitizeString } from './providers/types'
 
 export const name = 'aka-ai-generator'
 
@@ -472,7 +473,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 检查用户每日调用限制
-  async function checkDailyLimit(userId: string, numImages: number = 1): Promise<{ allowed: boolean, message?: string, isAdmin?: boolean }> {
+  async function checkDailyLimit(userId: string, numImages: number = 1, updateRateLimitImmediately: boolean = true): Promise<{ allowed: boolean, message?: string, isAdmin?: boolean }> {
     // 检查是否为管理员
     if (isAdmin(userId)) {
       return { allowed: true, isAdmin: true }
@@ -482,6 +483,11 @@ export function apply(ctx: Context, config: Config) {
     const rateLimitCheck = checkRateLimit(userId)
     if (!rateLimitCheck.allowed) {
       return { ...rateLimitCheck, isAdmin: false }
+    }
+
+    // 通过限流检查后，立即更新限流记录（防止频繁失败请求绕过限流）
+    if (updateRateLimitImmediately) {
+      updateRateLimit(userId)
     }
 
     const usersData = await loadUsersData()
@@ -708,9 +714,7 @@ export function apply(ctx: Context, config: Config) {
 
     if (!userId) return
 
-    // 更新限流记录
-    updateRateLimit(userId)
-
+    // 注意：限流记录已在 checkDailyLimit 中更新，这里不再重复更新
     // 更新用户数据
     const { userData, consumptionType, freeUsed, purchasedUsed } = await updateUserData(userId, userName, commandName, numImages)
 
@@ -884,8 +888,10 @@ export function apply(ctx: Context, config: Config) {
     ]).catch(error => {
       const userId = session.userId
       if (userId) activeTasks.delete(userId)
-      logger.error('图像处理超时或失败', { userId, error })
-      return error.message === '命令执行超时' ? '图像处理超时，请重试' : `图像处理失败：${error.message}`
+      const sanitizedError = sanitizeError(error)
+      logger.error('图像处理超时或失败', { userId, error: sanitizedError })
+      const safeMessage = typeof error?.message === 'string' ? sanitizeString(error.message) : '未知错误'
+      return error.message === '命令执行超时' ? '图像处理超时，请重试' : `图像处理失败：${safeMessage}`
     })
   }
 
@@ -1005,11 +1011,15 @@ export function apply(ctx: Context, config: Config) {
 
     } catch (error: any) {
       activeTasks.delete(userId)
-      logger.error('图像处理失败', { userId, error })
+      
+      // 清理敏感信息后再记录日志
+      const sanitizedError = sanitizeError(error)
+      logger.error('图像处理失败', { userId, error: sanitizedError })
 
-      // 直接返回错误信息，以便用户知道具体原因
+      // 直接返回错误信息，以便用户知道具体原因（清理敏感信息）
       if (error?.message) {
-        return `图像处理失败：${error.message}`
+        const safeMessage = sanitizeString(error.message)
+        return `图像处理失败：${safeMessage}`
       }
 
       return '图像处理失败，请稍后重试'
@@ -1253,11 +1263,15 @@ export function apply(ctx: Context, config: Config) {
 
           } catch (error: any) {
             activeTasks.delete(userId)
-            logger.error('图片合成失败', { userId, error })
+            
+            // 清理敏感信息后再记录日志
+            const sanitizedError = sanitizeError(error)
+            logger.error('图片合成失败', { userId, error: sanitizedError })
 
-            // 直接返回错误信息
+            // 直接返回错误信息（清理敏感信息）
             if (error?.message) {
-              return `图片合成失败：${error.message}`
+              const safeMessage = sanitizeString(error.message)
+              return `图片合成失败：${safeMessage}`
             }
 
             return '图片合成失败，请稍后重试'
@@ -1269,8 +1283,10 @@ export function apply(ctx: Context, config: Config) {
       ]).catch(error => {
         const userId = session.userId
         if (userId) activeTasks.delete(userId)
-        logger.error('图片合成超时或失败', { userId, error })
-        return error.message === '命令执行超时' ? '图片合成超时，请重试' : `图片合成失败：${error.message}`
+        const sanitizedError = sanitizeError(error)
+        logger.error('图片合成超时或失败', { userId, error: sanitizedError })
+        const safeMessage = typeof error?.message === 'string' ? sanitizeString(error.message) : '未知错误'
+        return error.message === '命令执行超时' ? '图片合成超时，请重试' : `图片合成失败：${safeMessage}`
       })
     })
 
