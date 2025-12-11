@@ -1,7 +1,6 @@
 import { ImageProvider } from './types'
-import { YunwuProvider, YunwuConfig } from './yunwu'
-import { GptGodProvider, GptGodConfig } from './gptgod'
-import { GeminiProvider, GeminiConfig } from './gemini'
+import { GptGodProvider } from './gptgod'
+import { GeminiProvider } from './gemini'
 
 export type ProviderType = 'yunwu' | 'gptgod' | 'gemini'
 
@@ -26,9 +25,11 @@ export interface ProviderFactoryConfig {
 export function createImageProvider(config: ProviderFactoryConfig): ImageProvider {
   switch (config.provider) {
     case 'yunwu':
-      return new YunwuProvider({
+      // 云雾复用 Gemini Provider，但指定 API Base
+      return new GeminiProvider({
         apiKey: config.yunwuApiKey,
         modelId: config.yunwuModelId,
+        apiBase: 'https://yunwu.ai', // 指定云雾 API 地址
         apiTimeout: config.apiTimeout,
         logLevel: config.logLevel,
         logger: config.logger,
@@ -62,7 +63,5 @@ export function createImageProvider(config: ProviderFactoryConfig): ImageProvide
 }
 
 export { ImageProvider } from './types'
-export { YunwuProvider } from './yunwu'
 export { GptGodProvider } from './gptgod'
 export { GeminiProvider } from './gemini'
-

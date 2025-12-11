@@ -1,8 +1,9 @@
 import { Context, Schema, h, Session, Argv } from 'koishi'
-import { existsSync, mkdirSync, promises as fs } from 'fs'
+import { createImageProvider, ProviderType } from './providers'
+import { sanitizeError, sanitizeString } from './providers/utils'
+import { UserManager, RechargeRecord } from './services/UserManager'
+import { parseStyleCommandModifiers, buildModelMappingIndex } from './utils/parser'
 import { join } from 'path'
-import { createImageProvider, ImageProvider as IImageProvider, ProviderType } from './providers'
-import { sanitizeError, sanitizeString } from './providers/types'
 
 export const name = 'aka-ai-generator'
 
@@ -43,36 +44,10 @@ interface ResolvedStyleConfig extends StyleConfig {
   groupName?: string
 }
 
-interface StyleCommandModifiers {
-  modelMapping?: ModelMappingConfig
-  customPromptSuffix?: string
-  customAdditions?: string[]
-}
-
 interface ImageRequestContext {
   numImages?: number
   provider?: ProviderType
   modelId?: string
-}
-
-// 用户数据接口
-export interface UserData {
-  userId: string
-  userName: string
-  totalUsageCount: number
-  dailyUsageCount: number
-  lastDailyReset: string
-  purchasedCount: number           // 历史累计充值次数
-  remainingPurchasedCount: number // 当前剩余充值次数
-  donationCount: number
-  donationAmount: number
-  lastUsed: string
-  createdAt: string
-}
-
-// 用户数据存储接口
-export interface UsersData {
-  [userId: string]: UserData
 }
 
 // 插件配置接口
@@ -96,34 +71,8 @@ export interface Config {
   styles: StyleConfig[]
   styleGroups?: Record<string, StyleGroupConfig>
   logLevel: 'info' | 'debug'
-}
-
-// 充值记录接口
-export interface RechargeRecord {
-  id: string
-  timestamp: string
-  type: 'single' | 'batch' | 'all'
-  operator: {
-    userId: string
-    userName: string
-  }
-  targets: Array<{
-    userId: string
-    userName: string
-    amount: number
-    beforeBalance: number
-    afterBalance: number
-  }>
-  totalAmount: number
-  note: string
-  metadata: Record<string, any>
-}
-
-// 充值历史数据接口
-export interface RechargeHistory {
-  version: string
-  lastUpdate: string
-  records: RechargeRecord[]
+  securityBlockWindow: number
+  securityBlockWarningThreshold: number
 }
 
 const StyleItemSchema = Schema.object({
@@ -196,7 +145,19 @@ export const Config: Schema<Config> = Schema.intersect([
       Schema.const('debug').description('完整的debug信息'),
     ] as const)
       .default('info' as const)
-      .description('日志输出详细程度')
+      .description('日志输出详细程度'),
+
+    // 安全策略拦截设置
+    securityBlockWindow: Schema.number()
+      .default(600)
+      .min(60)
+      .max(3600)
+      .description('安全策略拦截追踪时间窗口（秒），在此时间窗口内连续触发拦截会被记录'),
+    securityBlockWarningThreshold: Schema.number()
+      .default(3)
+      .min(1)
+      .max(10)
+      .description('安全策略拦截警示阈值，连续触发此次数拦截后将发送警示消息，再次触发将被扣除积分')
   }),
 
   // 自定义风格命令配置
@@ -224,146 +185,27 @@ export const Config: Schema<Config> = Schema.intersect([
 
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('aka-ai-generator')
-  const activeTasks = new Map<string, string>()  // userId -> requestId
-  const rateLimitMap = new Map<string, number[]>()  // userId -> timestamps
+  const userManager = new UserManager(ctx.baseDir, logger)
 
-  // 供应商缓存，按 provider + modelId 复用实例
-  const providerCache = new Map<string, IImageProvider>()
-  function getProviderInstance(providerType: ProviderType, modelId?: string): IImageProvider {
-    const cacheKey = `${providerType}:${modelId || 'default'}`
-    if (!providerCache.has(cacheKey)) {
-      providerCache.set(cacheKey, createImageProvider({
-        provider: providerType,
-        yunwuApiKey: config.yunwuApiKey,
-        yunwuModelId: providerType === 'yunwu' ? (modelId || config.yunwuModelId) : config.yunwuModelId,
-        gptgodApiKey: config.gptgodApiKey,
-        gptgodModelId: providerType === 'gptgod' ? (modelId || config.gptgodModelId) : config.gptgodModelId,
-        geminiApiKey: config.geminiApiKey,
-        geminiModelId: providerType === 'gemini' ? (modelId || config.geminiModelId) : config.geminiModelId,
-        geminiApiBase: config.geminiApiBase,
-        apiTimeout: config.apiTimeout,
-        logLevel: config.logLevel,
-        logger,
-        ctx
-      }))
-    }
-    return providerCache.get(cacheKey)!
+  // 移除 Provider 缓存，改为按需创建，支持热重载
+  function getProviderInstance(providerType: ProviderType, modelId?: string) {
+    return createImageProvider({
+      provider: providerType,
+      yunwuApiKey: config.yunwuApiKey,
+      yunwuModelId: providerType === 'yunwu' ? (modelId || config.yunwuModelId) : config.yunwuModelId,
+      gptgodApiKey: config.gptgodApiKey,
+      gptgodModelId: providerType === 'gptgod' ? (modelId || config.gptgodModelId) : config.gptgodModelId,
+      geminiApiKey: config.geminiApiKey,
+      geminiModelId: providerType === 'gemini' ? (modelId || config.geminiModelId) : config.geminiModelId,
+      geminiApiBase: config.geminiApiBase,
+      apiTimeout: config.apiTimeout,
+      logLevel: config.logLevel,
+      logger,
+      ctx
+    })
   }
-  // 预热默认供应商
-  getProviderInstance(config.provider as ProviderType)
 
   const modelMappingIndex = buildModelMappingIndex(config.modelMappings)
-
-  function normalizeSuffix(value?: string) {
-    return value?.replace(/^\-+/, '').trim().toLowerCase()
-  }
-
-
-  function buildModelMappingIndex(mappings?: ModelMappingConfig[]) {
-    const map = new Map<string, ModelMappingConfig>()
-    if (!Array.isArray(mappings)) return map
-    for (const mapping of mappings) {
-      const key = normalizeSuffix(mapping?.suffix)
-      if (!key || !mapping?.modelId) continue
-      map.set(key, mapping)
-    }
-    return map
-  }
-
-  function parseStyleCommandModifiers(argv: Argv, imgParam?: any): StyleCommandModifiers {
-    // 优先从 session.content 解析原始文本，以支持被 Koishi 误吞的参数（如 -add, -4k）
-    const session = argv.session
-    let rawText = ''
-
-    if (session?.content) {
-      const elements = h.parse(session.content)
-      // 提取所有文本节点
-      rawText = h.select(elements, 'text').map(e => e.attrs.content).join(' ')
-    }
-
-    // 如果没有获取到 rawText，回退到原来的逻辑
-    const argsList = rawText ? rawText.split(/\s+/).filter(Boolean) : [...(argv.args || [])].map(arg => typeof arg === 'string' ? arg.trim() : '').filter(Boolean)
-
-    // 如果是回退逻辑，还需要处理 rest 和 imgParam
-    if (!rawText) {
-      const restStr = typeof argv.rest === 'string' ? argv.rest.trim() : ''
-      if (restStr) {
-        const restParts = restStr.split(/\s+/).filter(Boolean)
-        argsList.push(...restParts)
-      }
-
-      if (imgParam && typeof imgParam === 'string' && !imgParam.startsWith('http') && !imgParam.startsWith('data:')) {
-        const imgParts = imgParam.split(/\s+/).filter(Boolean)
-        argsList.push(...imgParts)
-      }
-    }
-
-    if (!argsList.length) return {}
-
-    const modifiers: StyleCommandModifiers = { customAdditions: [] }
-    const flagCandidates: string[] = []
-
-    let index = 0
-    while (index < argsList.length) {
-      const token = argsList[index]
-      if (!token) {
-        index++
-        continue
-      }
-
-      const lower = token.toLowerCase()
-
-      // -prompt:xxx 形式
-      if (lower.startsWith('-prompt:')) {
-        const promptHead = token.substring(token.indexOf(':') + 1)
-        const restTokens = argsList.slice(index + 1)
-        modifiers.customPromptSuffix = [promptHead, ...restTokens].join(' ').trim()
-        break
-      }
-
-      // -add <文本...> 追加用户自定义段
-      if (lower === '-add') {
-        index++
-        const additionTokens: string[] = []
-        // 读取直到下一个以 - 开头的 flag 或结束
-        while (index < argsList.length) {
-          const nextToken = argsList[index]
-          // 如果是 flag (以 - 开头)，且不是 -add (防止重复)，且在 mapping 中存在或者是已知 flag
-          // 这里简单判断：如果以 - 开头，且能在 mapping 中找到，或者是 -prompt，则停止
-          // 但为了简单，只要是 - 开头就停止，除非是 -add 的参数本身包含 - (极少)
-          if (nextToken.startsWith('-')) {
-            // 检查是否是有效的 flag
-            const key = normalizeSuffix(nextToken)
-            if (key && modelMappingIndex.has(key)) break
-            if (nextToken.toLowerCase().startsWith('-prompt:')) break
-            if (nextToken.toLowerCase() === '-add') break
-          }
-          additionTokens.push(nextToken)
-          index++
-        }
-        if (additionTokens.length) {
-          modifiers.customAdditions!.push(additionTokens.join(' '))
-        }
-        continue
-      }
-
-      flagCandidates.push(token)
-      index++
-    }
-
-    for (const arg of flagCandidates) {
-      if (!arg.startsWith('-')) continue
-      const key = normalizeSuffix(arg)
-      if (!key) continue
-      const mapping = modelMappingIndex.get(key)
-      if (mapping) {
-        modifiers.modelMapping = mapping
-        break
-      }
-    }
-
-    return modifiers
-  }
 
   // 获取动态风格指令
   const styleDefinitions = collectStyleDefinitions()
@@ -429,109 +271,6 @@ export function apply(ctx: Context, config: Config) {
     ]
   }
 
-  // 数据文件路径
-  const dataDir = './data/aka-ai-generator'
-  const dataFile = join(dataDir, 'users_data.json')
-  const backupFile = join(dataDir, 'users_data.json.backup')
-  const rechargeHistoryFile = join(dataDir, 'recharge_history.json')
-
-  // 确保数据目录存在
-  if (!existsSync(dataDir)) {
-    mkdirSync(dataDir, { recursive: true })
-  }
-
-  // 检查是否为管理员
-  function isAdmin(userId: string): boolean {
-    return config.adminUsers && config.adminUsers.includes(userId)
-  }
-
-  // 检查限流
-  function checkRateLimit(userId: string): { allowed: boolean, message?: string } {
-    const now = Date.now()
-    const userTimestamps = rateLimitMap.get(userId) || []
-    const windowStart = now - config.rateLimitWindow * 1000
-
-    // 清理过期的时间戳
-    const validTimestamps = userTimestamps.filter(timestamp => timestamp > windowStart)
-
-    if (validTimestamps.length >= config.rateLimitMax) {
-      return {
-        allowed: false,
-        message: `操作过于频繁，请${Math.ceil((validTimestamps[0] + config.rateLimitWindow * 1000 - now) / 1000)}秒后再试`
-      }
-    }
-
-    return { allowed: true }
-  }
-
-  // 更新限流记录
-  function updateRateLimit(userId: string): void {
-    const now = Date.now()
-    const userTimestamps = rateLimitMap.get(userId) || []
-    userTimestamps.push(now)
-    rateLimitMap.set(userId, userTimestamps)
-  }
-
-  // 检查用户每日调用限制
-  async function checkDailyLimit(userId: string, numImages: number = 1, updateRateLimitImmediately: boolean = true): Promise<{ allowed: boolean, message?: string, isAdmin?: boolean }> {
-    // 检查是否为管理员
-    if (isAdmin(userId)) {
-      return { allowed: true, isAdmin: true }
-    }
-
-    // 检查限流
-    const rateLimitCheck = checkRateLimit(userId)
-    if (!rateLimitCheck.allowed) {
-      return { ...rateLimitCheck, isAdmin: false }
-    }
-
-    // 通过限流检查后，立即更新限流记录（防止频繁失败请求绕过限流）
-    if (updateRateLimitImmediately) {
-      updateRateLimit(userId)
-    }
-
-    const usersData = await loadUsersData()
-    const userData = usersData[userId]
-
-    if (!userData) {
-      // 新用户，检查是否有足够的免费次数
-      if (numImages > config.dailyFreeLimit) {
-        return {
-          allowed: false,
-          message: `生成 ${numImages} 张图片需要 ${numImages} 次可用次数，但您的可用次数不足（今日免费：${config.dailyFreeLimit}次，充值：0次）`,
-          isAdmin: false
-        }
-      }
-      return { allowed: true, isAdmin: false }
-    }
-
-    const today = new Date().toDateString()
-    const lastReset = new Date(userData.lastDailyReset || userData.createdAt).toDateString()
-
-    // 如果是新的一天，重置每日计数（延迟写入，仅在真正使用时写入）
-    let dailyCount = userData.dailyUsageCount
-    if (today !== lastReset) {
-      dailyCount = 0
-      userData.dailyUsageCount = 0
-      userData.lastDailyReset = new Date().toISOString()
-      // 不立即写入，等待 updateUserData 时一起写入
-    }
-
-    // 计算剩余次数
-    const remainingToday = Math.max(0, config.dailyFreeLimit - dailyCount)
-    const totalAvailable = remainingToday + userData.remainingPurchasedCount
-
-    if (totalAvailable < numImages) {
-      return {
-        allowed: false,
-        message: `生成 ${numImages} 张图片需要 ${numImages} 次可用次数，但您的可用次数不足（今日免费剩余：${remainingToday}次，充值剩余：${userData.remainingPurchasedCount}次，共${totalAvailable}次）`,
-        isAdmin: false
-      }
-    }
-
-    return { allowed: true, isAdmin: false }
-  }
-
   // 通用输入获取函数
   async function getPromptInput(session: Session, message: string): Promise<string | null> {
     await session.send(message)
@@ -539,187 +278,17 @@ export function apply(ctx: Context, config: Config) {
     return input || null
   }
 
-
-  // 异步读取用户数据
-  async function loadUsersData(): Promise<UsersData> {
-    try {
-      if (existsSync(dataFile)) {
-        const data = await fs.readFile(dataFile, 'utf-8')
-        return JSON.parse(data)
-      }
-    } catch (error) {
-      logger.error('读取用户数据失败', error)
-      // 尝试从备份恢复
-      if (existsSync(backupFile)) {
-        try {
-          const backupData = await fs.readFile(backupFile, 'utf-8')
-          logger.warn('从备份文件恢复用户数据')
-          return JSON.parse(backupData)
-        } catch (backupError) {
-          logger.error('备份文件也损坏，使用空数据', backupError)
-        }
-      }
-    }
-    return {}
-  }
-
-  // 异步保存用户数据（带备份）
-  async function saveUsersData(data: UsersData): Promise<void> {
-    try {
-      // 如果原文件存在，先备份
-      if (existsSync(dataFile)) {
-        await fs.copyFile(dataFile, backupFile)
-      }
-
-      // 写入新数据
-      await fs.writeFile(dataFile, JSON.stringify(data, null, 2), 'utf-8')
-    } catch (error) {
-      logger.error('保存用户数据失败', error)
-      throw error
-    }
-  }
-
-  // 异步读取充值历史
-  async function loadRechargeHistory(): Promise<RechargeHistory> {
-    try {
-      if (existsSync(rechargeHistoryFile)) {
-        const data = await fs.readFile(rechargeHistoryFile, 'utf-8')
-        return JSON.parse(data)
-      }
-    } catch (error) {
-      logger.error('读取充值历史失败', error)
-    }
-    return {
-      version: '1.0.0',
-      lastUpdate: new Date().toISOString(),
-      records: []
-    }
-  }
-
-  // 异步保存充值历史
-  async function saveRechargeHistory(history: RechargeHistory): Promise<void> {
-    try {
-      history.lastUpdate = new Date().toISOString()
-      await fs.writeFile(rechargeHistoryFile, JSON.stringify(history, null, 2), 'utf-8')
-    } catch (error) {
-      logger.error('保存充值历史失败', error)
-      throw error
-    }
-  }
-
-  // 获取或创建用户数据
-  async function getUserData(userId: string, userName: string): Promise<UserData> {
-    const usersData = await loadUsersData()
-
-    if (!usersData[userId]) {
-      // 创建新用户数据
-      usersData[userId] = {
-        userId,
-        userName,
-        totalUsageCount: 0,
-        dailyUsageCount: 0,
-        lastDailyReset: new Date().toISOString(),
-        purchasedCount: 0,
-        remainingPurchasedCount: 0,
-        donationCount: 0,
-        donationAmount: 0,
-        lastUsed: new Date().toISOString(),
-        createdAt: new Date().toISOString()
-      }
-      await saveUsersData(usersData)
-      logger.info('创建新用户数据', { userId, userName })
-    }
-
-    return usersData[userId]
-  }
-
-  // 更新用户数据（优先消耗免费次数）
-  async function updateUserData(userId: string, userName: string, commandName: string, numImages: number = 1): Promise<{ userData: UserData, consumptionType: 'free' | 'purchased' | 'mixed', freeUsed: number, purchasedUsed: number }> {
-    const usersData = await loadUsersData()
-    const now = new Date().toISOString()
-    const today = new Date().toDateString()
-
-    if (!usersData[userId]) {
-      // 创建新用户数据，使用userId作为用户名
-      usersData[userId] = {
-        userId,
-        userName: userId,
-        totalUsageCount: numImages,
-        dailyUsageCount: numImages,
-        lastDailyReset: now,
-        purchasedCount: 0,
-        remainingPurchasedCount: 0,
-        donationCount: 0,
-        donationAmount: 0,
-        lastUsed: now,
-        createdAt: now
-      }
-      await saveUsersData(usersData)
-      return { userData: usersData[userId], consumptionType: 'free', freeUsed: numImages, purchasedUsed: 0 }
-    }
-
-    // 更新现有用户数据
-    // 不更新用户名，保持原有用户名
-    usersData[userId].totalUsageCount += numImages
-    usersData[userId].lastUsed = now
-
-    // 检查是否需要重置每日计数
-    const lastReset = new Date(usersData[userId].lastDailyReset || usersData[userId].createdAt).toDateString()
-    if (today !== lastReset) {
-      usersData[userId].dailyUsageCount = 0
-      usersData[userId].lastDailyReset = now
-    }
-
-    // 计算需要消耗的次数
-    let remainingToConsume = numImages
-    let freeUsed = 0
-    let purchasedUsed = 0
-
-    // 优先消耗每日免费次数
-    const availableFree = Math.max(0, config.dailyFreeLimit - usersData[userId].dailyUsageCount)
-    if (availableFree > 0) {
-      const freeToUse = Math.min(availableFree, remainingToConsume)
-      usersData[userId].dailyUsageCount += freeToUse
-      freeUsed = freeToUse
-      remainingToConsume -= freeToUse
-    }
-
-    // 如果还有剩余，消耗充值次数
-    if (remainingToConsume > 0) {
-      const purchasedToUse = Math.min(usersData[userId].remainingPurchasedCount, remainingToConsume)
-      usersData[userId].remainingPurchasedCount -= purchasedToUse
-      purchasedUsed = purchasedToUse
-      remainingToConsume -= purchasedToUse
-    }
-
-    await saveUsersData(usersData)
-
-    // 确定消费类型
-    let consumptionType: 'free' | 'purchased' | 'mixed'
-    if (freeUsed > 0 && purchasedUsed > 0) {
-      consumptionType = 'mixed'
-    } else if (freeUsed > 0) {
-      consumptionType = 'free'
-    } else {
-      consumptionType = 'purchased'
-    }
-
-    return { userData: usersData[userId], consumptionType, freeUsed, purchasedUsed }
-  }
-
   // 记录用户调用次数并发送统计信息（仅在成功时调用）
   async function recordUserUsage(session: Session, commandName: string, numImages: number = 1) {
     const userId = session.userId
     const userName = session.username || session.userId || '未知用户'
-
     if (!userId) return
 
-    // 注意：限流记录已在 checkDailyLimit 中更新，这里不再重复更新
-    // 更新用户数据
-    const { userData, consumptionType, freeUsed, purchasedUsed } = await updateUserData(userId, userName, commandName, numImages)
+    // 扣减额度
+    const { userData, consumptionType, freeUsed, purchasedUsed } = await userManager.consumeQuota(userId, userName, commandName, numImages, config)
 
     // 发送统计信息
-    if (isAdmin(userId)) {
+    if (userManager.isAdmin(userId, config)) {
       await session.send(`📊 使用统计 [管理员]\n用户：${userData.userName}\n总调用次数：${userData.totalUsageCount}次\n状态：无限制使用`)
     } else {
       const remainingToday = Math.max(0, config.dailyFreeLimit - userData.dailyUsageCount)
@@ -747,10 +316,36 @@ export function apply(ctx: Context, config: Config) {
       totalUsageCount: userData.totalUsageCount,
       dailyUsageCount: userData.dailyUsageCount,
       remainingPurchasedCount: userData.remainingPurchasedCount,
-      isAdmin: isAdmin(userId)
+      isAdmin: userManager.isAdmin(userId, config)
     })
   }
 
+  // 记录安全策略拦截并处理警示/扣除积分逻辑
+  async function recordSecurityBlock(session: Session, numImages: number = 1): Promise<void> {
+    const userId = session.userId
+    if (!userId) return
+
+    const { shouldWarn, shouldDeduct, blockCount } = await userManager.recordSecurityBlock(userId, config)
+    
+    logger.info('安全策略拦截记录', {
+      userId,
+      blockCount,
+      threshold: config.securityBlockWarningThreshold,
+      shouldWarn,
+      shouldDeduct,
+      numImages
+    })
+
+    if (shouldWarn) {
+      await session.send(`⚠️ 安全策略警示\n您已连续${config.securityBlockWarningThreshold}次触发安全策略拦截，再次发送被拦截内容将被扣除积分`)
+      logger.warn('用户收到安全策略警示', { userId, blockCount, threshold: config.securityBlockWarningThreshold })
+    } else if (shouldDeduct) {
+      // 用户已收到警示，再次被拦截时扣除积分
+      const commandName = '安全策略拦截'
+      await recordUserUsage(session, commandName, numImages)
+      logger.warn('用户因安全策略拦截被扣除积分', { userId, numImages })
+    }
+  }
 
   // 获取输入数据（支持单图/多图/纯文本）
   async function getInputData(session: Session, imgParam: any, mode: 'single' | 'multiple' | 'text'): Promise<{ images: string[], text?: string } | { error: string }> {
@@ -880,149 +475,185 @@ export function apply(ctx: Context, config: Config) {
 
   // 带超时的通用图像处理函数
   async function processImageWithTimeout(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, mode: 'single' | 'multiple' | 'text' = 'single') {
+    const userId = session.userId
+    let isTimeout = false
+    
     return Promise.race([
-      processImage(session, img, prompt, styleName, requestContext, displayInfo, mode),
+      processImage(session, img, prompt, styleName, requestContext, displayInfo, mode, () => isTimeout),
       new Promise<string>((_, reject) =>
-        setTimeout(() => reject(new Error('命令执行超时')), config.commandTimeout * 1000)
+        setTimeout(() => {
+            isTimeout = true
+            reject(new Error('命令执行超时'))
+        }, config.commandTimeout * 1000)
       )
-    ]).catch(error => {
-      const userId = session.userId
-      if (userId) activeTasks.delete(userId)
+    ]).catch(async error => {
+      if (userId) userManager.endTask(userId)
       const sanitizedError = sanitizeError(error)
       logger.error('图像处理超时或失败', { userId, error: sanitizedError })
+      
+      // 检测是否是安全策略拦截错误（超时错误除外）
+      if (error?.message !== '命令执行超时') {
+        const errorMessage = error?.message || ''
+        const isSecurityBlock = 
+          errorMessage.includes('内容被安全策略拦截') ||
+          errorMessage.includes('内容被安全策略阻止') ||
+          errorMessage.includes('内容被阻止') ||
+          errorMessage.includes('被阻止') ||
+          errorMessage.includes('SAFETY') ||
+          errorMessage.includes('RECITATION')
+
+        if (isSecurityBlock) {
+          // 记录安全策略拦截（使用请求的图片数量）
+          const imageCount = requestContext?.numImages || config.defaultNumImages
+          await recordSecurityBlock(session, imageCount)
+        }
+      }
+      
       const safeMessage = typeof error?.message === 'string' ? sanitizeString(error.message) : '未知错误'
       return error.message === '命令执行超时' ? '图像处理超时，请重试' : `图像处理失败：${safeMessage}`
     })
   }
 
   // 通用图像处理函数
-  async function processImage(session: any, img: any, prompt: string, styleName: string, requestContext?: ImageRequestContext, displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, mode: 'single' | 'multiple' | 'text' = 'single') {
+  async function processImage(
+    session: any, 
+    img: any, 
+    prompt: string, 
+    styleName: string, 
+    requestContext?: ImageRequestContext, 
+    displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string }, 
+    mode: 'single' | 'multiple' | 'text' = 'single',
+    checkTimeout?: () => boolean
+  ) {
     const userId = session.userId
 
     // 检查是否已有任务进行
-    if (activeTasks.has(userId)) {
+    if (!userManager.startTask(userId)) {
       return '您有一个图像处理任务正在进行中，请等待完成'
     }
 
-    // 获取参数
-    const imageCount = requestContext?.numImages || config.defaultNumImages
-
-    // 验证参数
-    if (imageCount < 1 || imageCount > 4) {
-      return '生成数量必须在 1-4 之间'
-    }
-
-    // 获取输入数据
-    const inputResult = await getInputData(session, img, mode)
-    if ('error' in inputResult) {
-      return inputResult.error
-    }
-    const { images: imageUrls, text: extraText } = inputResult
-
-    // 如果在交互中提供了额外文本，追加到 prompt
-    let finalPrompt = prompt
-    if (extraText) {
-      finalPrompt += ' ' + extraText
-    }
-    finalPrompt = finalPrompt.trim()
-
-    // 如果最终 prompt 为空（既没有预设 prompt，用户也没输入 prompt），则强制要求用户输入
-    if (!finalPrompt) {
-      await session.send('请发送画面描述')
-      
-      const promptMsg = await session.prompt(30000)
-      if (!promptMsg) {
-        return '未检测到描述，操作已取消'
-      }
-      const elements = h.parse(promptMsg)
-      const images = h.select(elements, 'img')
-      if (images.length > 0) {
-        return '检测到图片，本功能仅支持文字输入'
-      }
-      const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
-      if (text) {
-        finalPrompt = text
-      } else {
-        return '未检测到有效文字描述，操作已取消'
-      }
-    }
-
-    const providerType = (requestContext?.provider || config.provider) as ProviderType
-    const providerModelId = requestContext?.modelId || (providerType === 'yunwu' ? config.yunwuModelId : config.gptgodModelId)
-
-    logger.info('开始图像处理', {
-      userId,
-      imageUrls,
-      styleName,
-      prompt: finalPrompt,
-      numImages: imageCount,
-      provider: providerType,
-      modelId: providerModelId
-    })
-
-    // 构建提示信息
-    let statusMessage = `开始处理图片（${styleName}）`
-    const infoParts: string[] = []
-
-    if (displayInfo?.customAdditions && displayInfo.customAdditions.length > 0) {
-      infoParts.push(`自定义内容：${displayInfo.customAdditions.join('；')}`)
-    }
-
-    if (displayInfo?.modelId) {
-      const modelDesc = displayInfo.modelDescription || displayInfo.modelId
-      infoParts.push(`使用模型：${modelDesc}`)
-    }
-
-    if (infoParts.length > 0) {
-      statusMessage += `\n${infoParts.join('\n')}`
-    }
-
-    statusMessage += '...'
-
-    // 调用图像编辑API
-    await session.send(statusMessage)
-
     try {
-      activeTasks.set(userId, 'processing')
+        // 获取参数
+        const imageCount = requestContext?.numImages || config.defaultNumImages
 
-      const images = await requestProviderImages(finalPrompt, imageUrls, imageCount, requestContext)
-
-      if (images.length === 0) {
-        activeTasks.delete(userId)
-        return '图像处理失败：未能生成图片'
-      }
-
-      await session.send('图像处理完成！')
-
-      // 发送生成的图片
-      for (let i = 0; i < images.length; i++) {
-        await session.send(h.image(images[i]))
-
-        // 多张图片添加延时
-        if (images.length > 1 && i < images.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000))
+        // 验证参数
+        if (imageCount < 1 || imageCount > 4) {
+          return '生成数量必须在 1-4 之间'
         }
-      }
 
-      // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
-      await recordUserUsage(session, styleName, images.length)
+        // 获取输入数据
+        const inputResult = await getInputData(session, img, mode)
+        if ('error' in inputResult) {
+          return inputResult.error
+        }
+        
+        // 每次耗时操作后检查是否超时
+        if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
+        
+        const { images: imageUrls, text: extraText } = inputResult
 
-      activeTasks.delete(userId)
+        // 如果在交互中提供了额外文本，追加到 prompt
+        let finalPrompt = prompt
+        if (extraText) {
+          finalPrompt += ' ' + extraText
+        }
+        finalPrompt = finalPrompt.trim()
 
-    } catch (error: any) {
-      activeTasks.delete(userId)
-      
-      // 清理敏感信息后再记录日志
-      const sanitizedError = sanitizeError(error)
-      logger.error('图像处理失败', { userId, error: sanitizedError })
+        // 如果最终 prompt 为空（既没有预设 prompt，用户也没输入 prompt），则强制要求用户输入
+        if (!finalPrompt) {
+          await session.send('请发送画面描述')
+          
+          const promptMsg = await session.prompt(30000)
+          if (!promptMsg) {
+            return '未检测到描述，操作已取消'
+          }
+          const elements = h.parse(promptMsg)
+          const images = h.select(elements, 'img')
+          if (images.length > 0) {
+            return '检测到图片，本功能仅支持文字输入'
+          }
+          const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
+          if (text) {
+            finalPrompt = text
+          } else {
+            return '未检测到有效文字描述，操作已取消'
+          }
+        }
+        
+        if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
 
-      // 直接返回错误信息，以便用户知道具体原因（清理敏感信息）
-      if (error?.message) {
-        const safeMessage = sanitizeString(error.message)
-        return `图像处理失败：${safeMessage}`
-      }
+        const providerType = (requestContext?.provider || config.provider) as ProviderType
+        const providerModelId = requestContext?.modelId || (providerType === 'yunwu' ? config.yunwuModelId : config.gptgodModelId)
 
-      return '图像处理失败，请稍后重试'
+        logger.info('开始图像处理', {
+          userId,
+          imageUrls,
+          styleName,
+          prompt: finalPrompt,
+          numImages: imageCount,
+          provider: providerType,
+          modelId: providerModelId
+        })
+
+        // 构建提示信息
+        let statusMessage = `开始处理图片（${styleName}）`
+        const infoParts: string[] = []
+
+        if (displayInfo?.customAdditions && displayInfo.customAdditions.length > 0) {
+          infoParts.push(`自定义内容：${displayInfo.customAdditions.join('；')}`)
+        }
+
+        if (displayInfo?.modelId) {
+          const modelDesc = displayInfo.modelDescription || displayInfo.modelId
+          infoParts.push(`使用模型：${modelDesc}`)
+        }
+
+        if (infoParts.length > 0) {
+          statusMessage += `\n${infoParts.join('\n')}`
+        }
+
+        statusMessage += '...'
+
+        // 调用图像编辑API
+        await session.send(statusMessage)
+
+        const images = await requestProviderImages(finalPrompt, imageUrls, imageCount, requestContext)
+        
+        if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
+
+        if (images.length === 0) {
+          return '图像处理失败：未能生成图片'
+        }
+
+        // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
+        // 提前记录，防止发送图片过程中因适配器无响应导致统计失败
+        await recordUserUsage(session, styleName, images.length)
+
+        await session.send('图像处理完成！')
+
+        // 发送生成的图片
+        for (let i = 0; i < images.length; i++) {
+          if (checkTimeout && checkTimeout()) break // 中断发送
+          
+          try {
+            // 给图片发送增加独立超时(20s)，防止适配器无响应导致任务挂起
+            await Promise.race([
+              session.send(h.image(images[i])),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('SendTimeout')), 20000))
+            ])
+          } catch (err) {
+             // 仅记录警告，不中断流程，因为图片可能已经发出去了只是没收到回包
+             logger.warn(`图片发送可能超时 (用户: ${userId}): ${err instanceof Error ? err.message : String(err)}`)
+          }
+
+          // 多张图片添加延时
+          if (images.length > 1 && i < images.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000))
+          }
+        }
+
+    } finally {
+        userManager.endTask(userId)
     }
   }
 
@@ -1038,7 +669,7 @@ export function apply(ctx: Context, config: Config) {
             const { session, options } = argv
             if (!session?.userId) return '会话无效'
 
-            const modifiers = parseStyleCommandModifiers(argv, img)
+            const modifiers = parseStyleCommandModifiers(argv, img, modelMappingIndex)
             
             // 从用户自定义部分解析生成数量（不包括预设的 style.prompt）
             let userPromptParts: string[] = []
@@ -1054,7 +685,7 @@ export function apply(ctx: Context, config: Config) {
             const numImages = options?.num || config.defaultNumImages
 
             // 检查每日调用限制（传入实际要生成的图片数量）
-            const limitCheck = await checkDailyLimit(session.userId!, numImages)
+            const limitCheck = await userManager.checkDailyLimit(session.userId!, config, numImages)
             if (!limitCheck.allowed) {
               return limitCheck.message
             }
@@ -1103,7 +734,7 @@ export function apply(ctx: Context, config: Config) {
       const numImages = options?.num || config.defaultNumImages
       
       // 检查每日调用限制
-      const limitCheck = await checkDailyLimit(session.userId!, numImages)
+      const limitCheck = await userManager.checkDailyLimit(session.userId!, config, numImages)
       if (!limitCheck.allowed) {
         return limitCheck.message
       }
@@ -1125,7 +756,7 @@ export function apply(ctx: Context, config: Config) {
       const mode = options?.multiple ? 'multiple' : 'single'
 
       // 检查每日调用限制
-      const limitCheck = await checkDailyLimit(session.userId!, numImages)
+      const limitCheck = await userManager.checkDailyLimit(session.userId!, config, numImages)
       if (!limitCheck.allowed) {
         return limitCheck.message
       }
@@ -1143,148 +774,177 @@ export function apply(ctx: Context, config: Config) {
     .option('num', '-n <num:number> 生成图片数量 (1-4)')
     .action(async ({ session, options }) => {
       if (!session?.userId) return '会话无效'
+      const userId = session.userId
 
+      // 检查是否已有任务进行
+      if (!userManager.startTask(userId)) {
+        return '您有一个图像处理任务正在进行中，请等待完成'
+      }
+
+      // 需要手动释放任务锁，因为 processImageWithTimeout 内部也会加锁，这里为了复用逻辑需要特殊处理
+      // 实际上这里因为需要自定义交互流程，不能直接复用 processImage 的前半部分
+      // 简单的做法是：这里只做交互，获取到数据后，调用 processImageWithTimeout
+      // 但 processImageWithTimeout 又会去获取输入数据，这会冲突
+      
+      // 修正：我们手动实现合成图的超时控制，不使用 processImageWithTimeout
+      userManager.endTask(userId) // 先释放，下面重新加锁
+
+      let isTimeout = false
       return Promise.race([
         (async () => {
-          const userId = session.userId
-          if (!userId) return '会话无效'
+          if (!userManager.startTask(userId)) return '您有一个图像处理任务正在进行中'
 
-          // 检查是否已有任务进行
-          if (activeTasks.has(userId)) {
-            return '您有一个图像处理任务正在进行中，请等待完成'
-          }
+          try {
+            // 等待用户发送多张图片和prompt
+            await session.send('多张图片+描述')
 
-          // 等待用户发送多张图片和prompt
-          await session.send('多张图片+描述')
+            const collectedImages: string[] = []
+            let prompt = ''
 
-          const collectedImages: string[] = []
-          let prompt = ''
+            // 循环接收消息，直到收到纯文字消息作为 prompt
+            while (true) {
+              const msg = await session.prompt(60000) // 60秒超时
+              if (!msg) {
+                return '等待超时，请重试'
+              }
+              if (isTimeout) throw new Error('命令执行超时')
 
-          // 循环接收消息，直到收到纯文字消息作为 prompt
-          while (true) {
-            const msg = await session.prompt(60000) // 60秒超时
-            if (!msg) {
-              return '等待超时，请重试'
-            }
+              const elements = h.parse(msg)
+              const images = h.select(elements, 'img')
+              const textElements = h.select(elements, 'text')
+              const text = textElements.map(el => el.attrs.content).join(' ').trim()
 
-            const elements = h.parse(msg)
-            const images = h.select(elements, 'img')
-            const textElements = h.select(elements, 'text')
-            const text = textElements.map(el => el.attrs.content).join(' ').trim()
+              // 如果有图片，收集图片
+              if (images.length > 0) {
+                for (const img of images) {
+                  collectedImages.push(img.attrs.src)
+                }
 
-            // 如果有图片，收集图片
-            if (images.length > 0) {
-              for (const img of images) {
-                collectedImages.push(img.attrs.src)
+                // 如果同时有文字，作为 prompt 并结束
+                if (text) {
+                  prompt = text
+                  break
+                }
+
+                // 只有图片，继续等待
+                await session.send(`已收到 ${collectedImages.length} 张图片，继续发送或输入描述`)
+                continue
               }
 
-              // 如果同时有文字，作为 prompt 并结束
+              // 如果只有文字
               if (text) {
+                if (collectedImages.length < 2) {
+                  return `需要至少两张图片进行合成，当前只有 ${collectedImages.length} 张图片`
+                }
                 prompt = text
                 break
               }
 
-              // 只有图片，继续等待
-              await session.send(`已收到 ${collectedImages.length} 张图片，继续发送或输入描述`)
-              continue
+              // 既没有图片也没有文字
+              return '未检测到有效内容，操作已取消'
             }
 
-            // 如果只有文字
-            if (text) {
-              if (collectedImages.length < 2) {
-                return `需要至少两张图片进行合成，当前只有 ${collectedImages.length} 张图片`
-              }
-              prompt = text
-              break
+            // 验证
+            if (collectedImages.length < 2) {
+              return '需要至少两张图片进行合成，请重新发送'
             }
 
-            // 既没有图片也没有文字
-            return '未检测到有效内容，操作已取消'
-          }
+            if (!prompt) {
+              return '未检测到prompt描述，请重新发送'
+            }
 
-          // 验证
-          if (collectedImages.length < 2) {
-            return '需要至少两张图片进行合成，请重新发送'
-          }
+            const imageCount = options?.num || config.defaultNumImages
 
-          if (!prompt) {
-            return '未检测到prompt描述，请重新发送'
-          }
+            // 验证参数
+            if (imageCount < 1 || imageCount > 4) {
+              return '生成数量必须在 1-4 之间'
+            }
 
-          const imageCount = options?.num || config.defaultNumImages
+            // 检查每日调用限制（传入实际要生成的图片数量）
+            const limitCheck = await userManager.checkDailyLimit(userId, config, imageCount)
+            if (!limitCheck.allowed) {
+              return limitCheck.message
+            }
+            
+            if (isTimeout) throw new Error('命令执行超时')
 
-          // 验证参数
-          if (imageCount < 1 || imageCount > 4) {
-            return '生成数量必须在 1-4 之间'
-          }
+            logger.info('开始图片合成处理', {
+              userId,
+              imageUrls: collectedImages,
+              prompt,
+              numImages: imageCount,
+              imageCount: collectedImages.length
+            })
 
-          // 检查每日调用限制（传入实际要生成的图片数量）
-          const limitCheck = await checkDailyLimit(userId, imageCount)
-          if (!limitCheck.allowed) {
-            return limitCheck.message
-          }
-
-          logger.info('开始图片合成处理', {
-            userId,
-            imageUrls: collectedImages,
-            prompt,
-            numImages: imageCount,
-            imageCount: collectedImages.length
-          })
-
-          // 调用图像编辑API（支持多张图片）
-          await session.send(`开始合成图（${collectedImages.length}张）...\nPrompt: ${prompt}`)
-
-          try {
-            activeTasks.set(userId, 'processing')
+            // 调用图像编辑API（支持多张图片）
+            await session.send(`开始合成图（${collectedImages.length}张）...\nPrompt: ${prompt}`)
 
             const resultImages = await requestProviderImages(prompt, collectedImages, imageCount)
+            
+            if (isTimeout) throw new Error('命令执行超时')
 
             if (resultImages.length === 0) {
-              activeTasks.delete(userId)
               return '图片合成失败：未能生成图片'
             }
+
+            // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
+            // 提前记录，防止发送图片过程中因适配器无响应导致统计失败
+            await recordUserUsage(session, COMMANDS.COMPOSE_IMAGE, resultImages.length)
 
             await session.send('图片合成完成！')
 
             // 发送生成的图片
             for (let i = 0; i < resultImages.length; i++) {
-              await session.send(h.image(resultImages[i]))
+              if (isTimeout) break
+              
+              try {
+                // 给图片发送增加独立超时(20s)，防止适配器无响应导致任务挂起
+                await Promise.race([
+                  session.send(h.image(resultImages[i])),
+                  new Promise((_, reject) => setTimeout(() => reject(new Error('SendTimeout')), 20000))
+                ])
+              } catch (err) {
+                 logger.warn(`图片合成发送可能超时 (用户: ${userId}): ${err instanceof Error ? err.message : String(err)}`)
+              }
 
               if (resultImages.length > 1 && i < resultImages.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 1000))
               }
             }
 
-            // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
-            await recordUserUsage(session, COMMANDS.COMPOSE_IMAGE, resultImages.length)
-
-            activeTasks.delete(userId)
-
-          } catch (error: any) {
-            activeTasks.delete(userId)
-            
-            // 清理敏感信息后再记录日志
-            const sanitizedError = sanitizeError(error)
-            logger.error('图片合成失败', { userId, error: sanitizedError })
-
-            // 直接返回错误信息（清理敏感信息）
-            if (error?.message) {
-              const safeMessage = sanitizeString(error.message)
-              return `图片合成失败：${safeMessage}`
-            }
-
-            return '图片合成失败，请稍后重试'
+          } finally {
+            userManager.endTask(userId)
           }
         })(),
         new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('命令执行超时')), config.commandTimeout * 1000)
+          setTimeout(() => {
+              isTimeout = true
+              reject(new Error('命令执行超时'))
+          }, config.commandTimeout * 1000)
         )
-      ]).catch(error => {
-        const userId = session.userId
-        if (userId) activeTasks.delete(userId)
+      ]).catch(async error => {
+        if (userId) userManager.endTask(userId)
         const sanitizedError = sanitizeError(error)
         logger.error('图片合成超时或失败', { userId, error: sanitizedError })
+        
+        // 检测是否是安全策略拦截错误（超时错误除外）
+        if (error?.message !== '命令执行超时') {
+          const errorMessage = error?.message || ''
+          const isSecurityBlock = 
+            errorMessage.includes('内容被安全策略拦截') ||
+            errorMessage.includes('内容被安全策略阻止') ||
+            errorMessage.includes('内容被阻止') ||
+            errorMessage.includes('被阻止') ||
+            errorMessage.includes('SAFETY') ||
+            errorMessage.includes('RECITATION')
+
+          if (isSecurityBlock) {
+            // 记录安全策略拦截（使用请求的图片数量）
+            const imageCount = options?.num || config.defaultNumImages
+            await recordSecurityBlock(session, imageCount)
+          }
+        }
+        
         const safeMessage = typeof error?.message === 'string' ? sanitizeString(error.message) : '未知错误'
         return error.message === '命令执行超时' ? '图片合成超时，请重试' : `图片合成失败：${safeMessage}`
       })
@@ -1296,7 +956,7 @@ export function apply(ctx: Context, config: Config) {
       if (!session?.userId) return '会话无效'
 
       // 检查管理员权限
-      if (!isAdmin(session.userId)) {
+      if (!userManager.isAdmin(session.userId, config)) {
         return '权限不足，仅管理员可操作'
       }
 
@@ -1334,78 +994,68 @@ export function apply(ctx: Context, config: Config) {
       }
 
       try {
-
-        const usersData = await loadUsersData()
-        const rechargeHistory = await loadRechargeHistory()
         const now = new Date().toISOString()
         const recordId = `recharge_${now.replace(/[-:T.]/g, '').slice(0, 14)}_${Math.random().toString(36).substr(2, 3)}`
+        const targets: RechargeRecord['targets'] = []
+        let totalAmount = 0
 
-        const targets = []
-
-        // 为每个用户充值
-        for (const userId of userIds) {
-          if (!userId) continue // 跳过无效的userId
-
-          // 获取被充值用户的用户名，优先使用已存储的用户名，否则使用userId
-          let userName = userId
-          if (usersData[userId]) {
-            userName = usersData[userId].userName || userId
-          }
-
-          if (!usersData[userId]) {
-            // 创建新用户，使用userId作为初始用户名
-            usersData[userId] = {
-              userId,
-              userName: userId,
-              totalUsageCount: 0,
-              dailyUsageCount: 0,
-              lastDailyReset: now,
-              purchasedCount: 0,
-              remainingPurchasedCount: 0,
-              donationCount: 0,
-              donationAmount: 0,
-              lastUsed: now,
-              createdAt: now
-            }
-          }
-
-          const beforeBalance = usersData[userId].remainingPurchasedCount
-          usersData[userId].purchasedCount += amount
-          usersData[userId].remainingPurchasedCount += amount
-          // 不更新用户名，保持原有的用户名
-
-          targets.push({
-            userId,
-            userName,
-            amount,
-            beforeBalance,
-            afterBalance: usersData[userId].remainingPurchasedCount
-          })
-        }
-
-        // 保存用户数据
-        await saveUsersData(usersData)
-
+        // 批量更新用户数据
+        await userManager.updateUsersBatch((usersData) => {
+             for (const userId of userIds) {
+                if (!userId) continue
+                
+                let userName = userId
+                if (usersData[userId]) {
+                    userName = usersData[userId].userName || userId
+                } else {
+                    // 创建新用户
+                    usersData[userId] = {
+                        userId,
+                        userName: userId,
+                        totalUsageCount: 0,
+                        dailyUsageCount: 0,
+                        lastDailyReset: now,
+                        purchasedCount: 0,
+                        remainingPurchasedCount: 0,
+                        donationCount: 0,
+                        donationAmount: 0,
+                        lastUsed: now,
+                        createdAt: now
+                    }
+                }
+                
+                const beforeBalance = usersData[userId].remainingPurchasedCount
+                usersData[userId].purchasedCount += amount
+                usersData[userId].remainingPurchasedCount += amount
+                
+                targets.push({
+                    userId,
+                    userName,
+                    amount,
+                    beforeBalance,
+                    afterBalance: usersData[userId].remainingPurchasedCount
+                })
+             }
+             totalAmount = amount * targets.length
+        })
+        
         // 记录充值历史
-        const record: RechargeRecord = {
-          id: recordId,
-          timestamp: now,
-          type: userIds.length > 1 ? 'batch' : 'single',
-          operator: {
-            userId: session.userId,
-            userName: session.username || session.userId
-          },
-          targets,
-          totalAmount: amount * userIds.length,
-          note: note || '管理员充值',
-          metadata: {}
-        }
-
-        rechargeHistory.records.push(record)
-        await saveRechargeHistory(rechargeHistory)
+        await userManager.addRechargeRecord({
+            id: recordId,
+            timestamp: now,
+            type: targets.length > 1 ? 'batch' : 'single',
+            operator: {
+                userId: session.userId,
+                userName: session.username || session.userId
+            },
+            targets,
+            totalAmount,
+            note,
+            metadata: {}
+        })
 
         const userList = targets.map(t => `${t.userName}(${t.afterBalance}次)`).join(', ')
-        return `✅ 充值成功\n目标用户：${userList}\n充值次数：${amount}次/人\n总充值：${record.totalAmount}次\n操作员：${record.operator.userName}\n备注：${record.note}`
+        return `✅ 充值成功\n目标用户：${userList}\n充值次数：${amount}次/人\n总充值：${totalAmount}次\n操作员：${session.username}\n备注：${note}`
 
       } catch (error) {
         logger.error('充值操作失败', error)
@@ -1419,7 +1069,7 @@ export function apply(ctx: Context, config: Config) {
       if (!session?.userId) return '会话无效'
 
       // 检查管理员权限
-      if (!isAdmin(session.userId)) {
+      if (!userManager.isAdmin(session.userId, config)) {
         return '权限不足，仅管理员可操作'
       }
 
@@ -1446,61 +1096,56 @@ export function apply(ctx: Context, config: Config) {
       }
 
       try {
-        const usersData = await loadUsersData()
-        const rechargeHistory = await loadRechargeHistory()
         const now = new Date().toISOString()
         const recordId = `recharge_all_${now.replace(/[-:T.]/g, '').slice(0, 14)}_${Math.random().toString(36).substr(2, 3)}`
+        const targets: RechargeRecord['targets'] = []
+        let totalAmount = 0
+        let successCount = 0
 
-        const allUserIds = Object.keys(usersData).filter(userId => userId && usersData[userId])
+        // 批量更新所有用户
+        await userManager.updateUsersBatch((usersData) => {
+             const allUserIds = Object.keys(usersData)
+             for (const userId of allUserIds) {
+                 if (!userId || !usersData[userId]) continue
+                 
+                 const userData = usersData[userId]
+                 const beforeBalance = userData.remainingPurchasedCount
+                 
+                 userData.purchasedCount += amount
+                 userData.remainingPurchasedCount += amount
+                 
+                 targets.push({
+                     userId,
+                     userName: userData.userName || userId,
+                     amount,
+                     beforeBalance,
+                     afterBalance: userData.remainingPurchasedCount
+                 })
+                 successCount++
+             }
+             totalAmount = amount * successCount
+        })
 
-        if (allUserIds.length === 0) {
-          return '当前没有使用过插件的用户，无法进行活动充值'
+        if (successCount === 0) {
+            return '当前没有使用过插件的用户，无法进行活动充值'
         }
-
-        const targets = []
-
-        // 为所有用户充值
-        for (const userId of allUserIds) {
-          if (!userId) continue
-
-          const userData = usersData[userId]
-          const userName = userData.userName || userId
-          const beforeBalance = userData.remainingPurchasedCount
-
-          userData.purchasedCount += amount
-          userData.remainingPurchasedCount += amount
-
-          targets.push({
-            userId,
-            userName,
-            amount,
-            beforeBalance,
-            afterBalance: userData.remainingPurchasedCount
-          })
-        }
-
-        // 保存用户数据
-        await saveUsersData(usersData)
 
         // 记录充值历史
-        const record: RechargeRecord = {
-          id: recordId,
-          timestamp: now,
-          type: 'all',
-          operator: {
-            userId: session.userId,
-            userName: session.username || session.userId
-          },
-          targets,
-          totalAmount: amount * allUserIds.length,
-          note: note || '活动充值',
-          metadata: { all: true }
-        }
+        await userManager.addRechargeRecord({
+            id: recordId,
+            timestamp: now,
+            type: 'all',
+            operator: {
+                userId: session.userId,
+                userName: session.username || session.userId
+            },
+            targets,
+            totalAmount,
+            note,
+            metadata: { all: true }
+        })
 
-        rechargeHistory.records.push(record)
-        await saveRechargeHistory(rechargeHistory)
-
-        return `✅ 活动充值成功\n目标用户数：${allUserIds.length}人\n充值次数：${amount}次/人\n总充值：${record.totalAmount}次\n操作员：${record.operator.userName}\n备注：${record.note}`
+        return `✅ 活动充值成功\n目标用户数：${successCount}人\n充值次数：${amount}次/人\n总充值：${totalAmount}次\n操作员：${session.username}\n备注：${note}`
 
       } catch (error) {
         logger.error('活动充值操作失败', error)
@@ -1513,7 +1158,7 @@ export function apply(ctx: Context, config: Config) {
     .action(async ({ session }, target) => {
       if (!session?.userId) return '会话无效'
 
-      const userIsAdmin = isAdmin(session.userId)
+      const userIsAdmin = userManager.isAdmin(session.userId, config)
       let targetUserId = session.userId
       let targetUserName = session.username || session.userId
 
@@ -1529,13 +1174,9 @@ export function apply(ctx: Context, config: Config) {
       }
 
       try {
-        const usersData = await loadUsersData()
-        const userData = usersData[targetUserId]
+        const userData = await userManager.getUserData(targetUserId, targetUserName)
 
-        if (!userData) {
-          return `👤 用户信息\n用户：${targetUserName}\n状态：新用户\n今日剩余免费：${config.dailyFreeLimit}次\n充值剩余：0次`
-        }
-
+        // 这里的 userData 虽然是初始化的（如果用户不存在），但也符合查询逻辑
         const remainingToday = Math.max(0, config.dailyFreeLimit - userData.dailyUsageCount)
         const totalAvailable = remainingToday + userData.remainingPurchasedCount
 
@@ -1552,12 +1193,12 @@ export function apply(ctx: Context, config: Config) {
     .action(async ({ session }, page = 1) => {
       if (!session?.userId) return '会话无效'
 
-      if (!isAdmin(session.userId)) {
+      if (!userManager.isAdmin(session.userId, config)) {
         return '权限不足，仅管理员可查看充值记录'
       }
 
       try {
-        const history = await loadRechargeHistory()
+        const history = await userManager.loadRechargeHistory()
         const pageSize = 10
         const totalPages = Math.ceil(history.records.length / pageSize)
         const startIndex = (page - 1) * pageSize
@@ -1591,7 +1232,7 @@ export function apply(ctx: Context, config: Config) {
 
       try {
         // 获取当前用户的管理员状态
-        const userIsAdmin = isAdmin(session.userId)
+        const userIsAdmin = userManager.isAdmin(session.userId, config)
 
         let result = '🎨 图像处理功能列表\n\n'
 

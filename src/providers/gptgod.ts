@@ -1,4 +1,5 @@
-import { ImageProvider, ProviderConfig, sanitizeError, sanitizeString } from './types'
+import { ImageProvider, ProviderConfig } from './types'
+import { sanitizeError, sanitizeString, downloadImageAsBase64 } from './utils'
 
 const GPTGOD_DEFAULT_API_URL = 'https://api.gptgod.online/v1/chat/completions'
 
@@ -9,45 +10,6 @@ export interface GptGodConfig extends ProviderConfig {
 
 const HTTP_URL_REGEX = /^https?:\/\//i
 const DATA_URL_REGEX = /^data:image\//i
-
-/**
- * 下载图片并转换为 Base64
- */
-async function downloadImageAsBase64(
-  ctx: any,
-  url: string,
-  timeout: number,
-  logger: any
-): Promise<{ data: string, mimeType: string }> {
-  try {
-    const response = await ctx.http.get(url, {
-      responseType: 'arraybuffer',
-      timeout: timeout * 1000
-    })
-
-    const buffer = Buffer.from(response)
-    const base64 = buffer.toString('base64')
-
-    // 通过扩展名检测 MIME 类型
-    let mimeType = 'image/jpeg'
-    const urlLower = url.toLowerCase()
-    if (urlLower.endsWith('.png')) {
-      mimeType = 'image/png'
-    } else if (urlLower.endsWith('.webp')) {
-      mimeType = 'image/webp'
-    } else if (urlLower.endsWith('.gif')) {
-      mimeType = 'image/gif'
-    }
-
-    if (logger) {
-      logger.debug('图片下载并转换为Base64', { url, mimeType, size: base64.length })
-    }
-    return { data: base64, mimeType }
-  } catch (error) {
-    logger.error('下载图片失败', { url, error })
-    throw new Error('下载图片失败，请检查图片链接是否有效')
-  }
-}
 
 function isHttpImage(url: string): boolean {
   return HTTP_URL_REGEX.test(url)
@@ -265,7 +227,7 @@ function parseGptGodResponse(response: any, logger?: any): string[] {
 
     return images
   } catch (error) {
-    logger?.error('解析响应时出错', { error })
+    logger?.error('解析响应时出错', { error: sanitizeError(error) })
     return []
   }
 }
@@ -293,13 +255,17 @@ export class GptGodProvider implements ImageProvider {
     // 预先构建图片内容部分（所有循环共用）
     const imageParts: any[] = []
     for (const url of urls) {
-      const imagePart = await buildImageContentPart(
-        ctx,
-        url,
-        this.config.apiTimeout,
-        logger
-      )
-      imageParts.push(imagePart)
+      try {
+        const imagePart = await buildImageContentPart(
+          ctx,
+          url,
+          this.config.apiTimeout,
+          logger
+        )
+        imageParts.push(imagePart)
+      } catch (error) {
+        logger.error('构建图片部分失败，跳过该图片', { url, error: sanitizeError(error) })
+      }
     }
 
     // GPTGod API 循环调用生成多张图片
@@ -476,7 +442,6 @@ export class GptGodProvider implements ImageProvider {
 
           // 不可重试的错误或已达到最大重试次数
           // 清理敏感信息后再记录日志
-          const sanitizedError = sanitizeError(error)
           const safeMessage = typeof error?.message === 'string' ? sanitizeString(error.message) : '未知错误'
           
           logger.error('GPTGod 图像编辑 API 调用失败', {
@@ -534,4 +499,3 @@ export class GptGodProvider implements ImageProvider {
     return allImages
   }
 }
-

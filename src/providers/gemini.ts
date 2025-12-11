@@ -1,46 +1,10 @@
-import { ImageProvider, ProviderConfig, sanitizeError, sanitizeString } from './types'
+import { ImageProvider, ProviderConfig } from './types'
+import { sanitizeError, sanitizeString, downloadImageAsBase64 } from './utils'
 
 export interface GeminiConfig extends ProviderConfig {
   apiKey: string
   modelId: string
   apiBase?: string
-}
-
-/**
- * 下载图片并转换为 Base64
- */
-async function downloadImageAsBase64(
-  ctx: any,
-  url: string,
-  timeout: number,
-  logger: any
-): Promise<{ data: string, mimeType: string }> {
-  try {
-    const response = await ctx.http.get(url, { 
-      responseType: 'arraybuffer',
-      timeout: timeout * 1000
-    })
-    
-    const buffer = Buffer.from(response)
-    const base64 = buffer.toString('base64')
-    
-    // 通过扩展名检测 MIME 类型
-    let mimeType = 'image/jpeg'
-    const urlLower = url.toLowerCase()
-    if (urlLower.endsWith('.png')) {
-      mimeType = 'image/png'
-    } else if (urlLower.endsWith('.webp')) {
-      mimeType = 'image/webp'
-    } else if (urlLower.endsWith('.gif')) {
-      mimeType = 'image/gif'
-    }
-    
-    logger.debug('图片下载并转换为Base64', { url, mimeType, size: base64.length })
-    return { data: base64, mimeType }
-  } catch (error) {
-    logger.error('下载图片失败', { url, error })
-    throw new Error('下载图片失败，请检查图片链接是否有效')
-  }
 }
 
 /**
@@ -67,6 +31,7 @@ function parseGeminiResponse(response: any, logger?: any): string[] {
     }
     
     // 检查 promptFeedback，如果请求被阻止，响应中可能没有 candidates
+    // 注意：部分第三方实现可能没有 promptFeedback，这里需要做空检查
     if (response.promptFeedback) {
       const blockReason = response.promptFeedback.blockReason
       const safetyRatings = response.promptFeedback.safetyRatings
@@ -232,18 +197,23 @@ export class GeminiProvider implements ImageProvider {
     for (const url of urls) {
       if (!url || !url.trim()) continue
       
-      const { data, mimeType } = await downloadImageAsBase64(
-        ctx,
-        url,
-        this.config.apiTimeout,
-        logger
-      )
-      imageParts.push({
-        inline_data: {
-          mime_type: mimeType,
-          data: data
-        }
-      })
+      try {
+        const { data, mimeType } = await downloadImageAsBase64(
+          ctx,
+          url,
+          this.config.apiTimeout,
+          logger
+        )
+        imageParts.push({
+          inline_data: {
+            mime_type: mimeType,
+            data: data
+          }
+        })
+      } catch (error) {
+        logger.error('处理输入图片失败，跳过该图片', { url, error: sanitizeError(error) })
+        // 可以选择抛出错误，或者继续处理（这里选择继续，但记录错误）
+      }
     }
     
     // API 基础地址
@@ -334,4 +304,3 @@ export class GeminiProvider implements ImageProvider {
     return allImages
   }
 }
-
