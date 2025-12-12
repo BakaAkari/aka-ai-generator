@@ -14,6 +14,12 @@ function parseGeminiResponse(response: any, logger?: any): string[] {
   try {
     const images: string[] = []
     
+    logger?.debug('开始解析 Gemini API 响应', {
+      hasResponse: !!response,
+      responseType: typeof response,
+      responseKeys: response ? Object.keys(response) : []
+    })
+    
     // 检查响应结构
     if (!response) {
       logger?.error('Gemini API 响应为空')
@@ -74,7 +80,18 @@ function parseGeminiResponse(response: any, logger?: any): string[] {
     }
     
     if (response.candidates && response.candidates.length > 0) {
-      for (const candidate of response.candidates) {
+      logger?.debug('找到 candidates', { candidatesCount: response.candidates.length })
+      
+      for (let candIdx = 0; candIdx < response.candidates.length; candIdx++) {
+        const candidate = response.candidates[candIdx]
+        logger?.debug('处理 candidate', { 
+          index: candIdx,
+          hasContent: !!candidate.content,
+          hasParts: !!candidate.content?.parts,
+          partsCount: candidate.content?.parts?.length || 0,
+          finishReason: candidate.finishReason
+        })
+        
         // 检查 finishReason，如果是 STOP 以外的值可能有错误
         if (candidate.finishReason && candidate.finishReason !== 'STOP') {
           logger?.warn('Gemini 响应 finishReason 异常', { 
@@ -94,14 +111,35 @@ function parseGeminiResponse(response: any, logger?: any): string[] {
         }
         
         if (candidate.content && candidate.content.parts) {
-          for (const part of candidate.content.parts) {
+          logger?.debug('处理 candidate.content.parts', { 
+            partsCount: candidate.content.parts.length,
+            partsKeys: candidate.content.parts.map((p: any) => Object.keys(p))
+          })
+          
+          for (let partIdx = 0; partIdx < candidate.content.parts.length; partIdx++) {
+            const part = candidate.content.parts[partIdx]
+            const partKeys = Object.keys(part)
+            logger?.debug('处理 part', { 
+              partIndex: partIdx,
+              partKeys,
+              hasInlineData: !!part.inlineData,
+              hasInline_data: !!part.inline_data,
+              hasFileData: !!part.fileData,
+              hasText: !!part.text
+            })
+            
             // 检查是否有 inlineData（Base64 图片，驼峰命名）
             if (part.inlineData && part.inlineData.data) {
               const base64Data = part.inlineData.data
               const mimeType = part.inlineData.mimeType || 'image/jpeg'
               const dataUrl = `data:${mimeType};base64,${base64Data}`
               images.push(dataUrl)
-              logger?.debug('从响应中提取到图片 (inlineData)', { mimeType, dataLength: base64Data.length })
+              logger?.info('从响应中提取到图片 (inlineData)', { 
+                mimeType, 
+                dataLength: base64Data.length,
+                dataUrlLength: dataUrl.length,
+                imageIndex: images.length - 1
+              })
             }
             // 兼容下划线命名
             else if (part.inline_data && part.inline_data.data) {
@@ -109,20 +147,40 @@ function parseGeminiResponse(response: any, logger?: any): string[] {
               const mimeType = part.inline_data.mime_type || 'image/jpeg'
               const dataUrl = `data:${mimeType};base64,${base64Data}`
               images.push(dataUrl)
-              logger?.debug('从响应中提取到图片 (inline_data)', { mimeType, dataLength: base64Data.length })
+              logger?.info('从响应中提取到图片 (inline_data)', { 
+                mimeType, 
+                dataLength: base64Data.length,
+                dataUrlLength: dataUrl.length,
+                imageIndex: images.length - 1
+              })
             }
             // 检查是否有 fileData（文件引用）
             else if (part.fileData && part.fileData.fileUri) {
               images.push(part.fileData.fileUri)
-              logger?.debug('从响应中提取到图片 (fileData)', { fileUri: part.fileData.fileUri })
+              logger?.info('从响应中提取到图片 (fileData)', { 
+                fileUri: part.fileData.fileUri,
+                imageIndex: images.length - 1
+              })
             }
             // 如果 part 只有 text，说明没有生成图片
             else if (part.text) {
-              logger?.warn('响应中包含文本而非图片', { text: part.text.substring(0, 100) })
+              logger?.warn('响应中包含文本而非图片', { 
+                text: part.text.substring(0, 100),
+                textLength: part.text.length
+              })
+            } else {
+              logger?.warn('part 中没有找到图片或文本数据', { 
+                partKeys,
+                part: JSON.stringify(part).substring(0, 200)
+              })
             }
           }
         } else {
-          logger?.warn('候选响应中没有 content.parts', { candidate: JSON.stringify(candidate).substring(0, 200) })
+          logger?.warn('候选响应中没有 content.parts', { 
+            candidateIndex: candIdx,
+            candidateKeys: Object.keys(candidate),
+            candidate: JSON.stringify(candidate).substring(0, 200) 
+          })
         }
       }
     } else {
@@ -149,13 +207,20 @@ function parseGeminiResponse(response: any, logger?: any): string[] {
       }
     }
     
+    logger?.debug('parseGeminiResponse 完成', {
+      extractedImagesCount: images.length,
+      hasCandidates: !!response.candidates,
+      candidatesCount: response.candidates?.length || 0
+    })
+    
     if (images.length === 0) {
       logger?.error('未能从 Gemini API 响应中提取到任何图片', {
         hasCandidates: !!response.candidates,
         candidatesCount: response.candidates?.length || 0,
         responseKeys: Object.keys(response),
-        firstCandidate: response.candidates?.[0] ? JSON.stringify(response.candidates[0]).substring(0, 300) : null,
-        promptFeedback: response.promptFeedback ? JSON.stringify(response.promptFeedback) : null
+        firstCandidate: response.candidates?.[0] ? JSON.stringify(response.candidates[0]).substring(0, 500) : null,
+        promptFeedback: response.promptFeedback ? JSON.stringify(response.promptFeedback) : null,
+        fullResponse: JSON.stringify(response).substring(0, 1000)
       })
     }
     
@@ -178,7 +243,12 @@ export class GeminiProvider implements ImageProvider {
     this.config = config
   }
 
-  async generateImages(prompt: string, imageUrls: string | string[], numImages: number): Promise<string[]> {
+  async generateImages(
+    prompt: string, 
+    imageUrls: string | string[], 
+    numImages: number,
+    onImageGenerated?: (imageUrl: string, index: number, total: number) => void | Promise<void>
+  ): Promise<string[]> {
     // 处理空数组或空字符串的情况
     let urls: string[] = []
     if (Array.isArray(imageUrls)) {
@@ -270,9 +340,69 @@ export class GeminiProvider implements ImageProvider {
           // 继续执行，不立即抛出错误，等待循环结束后统一处理
         } else {
           logger.success('Gemini API 调用成功', { current: i + 1, total: numImages, imagesCount: images.length })
+          
+          // 流式处理：每生成一张图片就立即调用回调
+          logger.debug('开始流式处理图片', { 
+            imagesCount: images.length,
+            hasCallback: !!onImageGenerated,
+            current: i + 1,
+            total: numImages
+          })
+          
+          for (let imgIdx = 0; imgIdx < images.length; imgIdx++) {
+            const imageUrl = images[imgIdx]
+            const currentIndex = allImages.length // 当前图片的全局索引
+            allImages.push(imageUrl)
+            
+            logger.debug('准备处理单张图片', {
+              imgIdx,
+              currentIndex,
+              total: numImages,
+              imageUrlType: typeof imageUrl,
+              imageUrlLength: imageUrl?.length || 0,
+              imageUrlPrefix: imageUrl?.substring(0, 50) || 'null'
+            })
+            
+            // 调用回调函数，立即发送图片
+            if (onImageGenerated) {
+              logger.info('准备调用图片生成回调函数', { 
+                hasCallback: true,
+                currentIndex,
+                total: numImages,
+                imageUrlLength: imageUrl?.length || 0
+              })
+              try {
+                await onImageGenerated(imageUrl, currentIndex, numImages)
+                logger.info('图片生成回调函数执行成功', { 
+                  currentIndex, 
+                  total: numImages,
+                  imageUrlLength: imageUrl?.length || 0
+                })
+              } catch (callbackError) {
+                logger.error('图片生成回调函数执行失败', { 
+                  error: sanitizeError(callbackError),
+                  errorMessage: callbackError?.message,
+                  errorStack: callbackError?.stack,
+                  currentIndex,
+                  total: numImages,
+                  imageUrlLength: imageUrl?.length || 0
+                })
+                // 回调失败不影响继续生成
+              }
+            } else {
+              logger.warn('图片生成回调函数未提供，跳过流式发送', { 
+                currentIndex,
+                total: numImages,
+                imageUrlLength: imageUrl?.length || 0
+              })
+            }
+          }
+          
+          logger.debug('流式处理图片完成', {
+            processedCount: images.length,
+            allImagesCount: allImages.length
+          })
         }
-        
-        allImages.push(...images)
       } catch (error: any) {
         // 清理敏感信息后再记录日志
         const sanitizedError = sanitizeError(error)

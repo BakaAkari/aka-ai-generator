@@ -239,7 +239,12 @@ export class GptGodProvider implements ImageProvider {
     this.config = config
   }
 
-  async generateImages(prompt: string, imageUrls: string | string[], numImages: number): Promise<string[]> {
+  async generateImages(
+    prompt: string, 
+    imageUrls: string | string[], 
+    numImages: number,
+    onImageGenerated?: (imageUrl: string, index: number, total: number) => void | Promise<void>
+  ): Promise<string[]> {
     const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls]
     const logger = this.config.logger
     const ctx = this.config.ctx
@@ -403,7 +408,68 @@ export class GptGodProvider implements ImageProvider {
             }
           }
 
-          allImages.push(...images)
+          // 流式处理：每生成一张图片就立即调用回调
+          logger.debug('开始流式处理图片 (GPTGod)', { 
+            imagesCount: images.length,
+            hasCallback: !!onImageGenerated,
+            current: i + 1,
+            total: numImages
+          })
+          
+          for (let imgIdx = 0; imgIdx < images.length; imgIdx++) {
+            const imageUrl = images[imgIdx]
+            const currentIndex = allImages.length // 当前图片的全局索引
+            allImages.push(imageUrl)
+            
+            logger.debug('准备处理单张图片 (GPTGod)', {
+              imgIdx,
+              currentIndex,
+              total: numImages,
+              imageUrlType: typeof imageUrl,
+              imageUrlLength: imageUrl?.length || 0,
+              imageUrlPrefix: imageUrl?.substring(0, 50) || 'null'
+            })
+            
+            // 调用回调函数，立即发送图片
+            if (onImageGenerated) {
+              logger.info('准备调用图片生成回调函数 (GPTGod)', { 
+                hasCallback: true,
+                currentIndex,
+                total: numImages,
+                imageUrlLength: imageUrl?.length || 0
+              })
+              try {
+                await onImageGenerated(imageUrl, currentIndex, numImages)
+                logger.info('图片生成回调函数执行成功 (GPTGod)', { 
+                  currentIndex, 
+                  total: numImages,
+                  imageUrlLength: imageUrl?.length || 0
+                })
+              } catch (callbackError) {
+                logger.error('图片生成回调函数执行失败 (GPTGod)', { 
+                  error: sanitizeError(callbackError),
+                  errorMessage: callbackError?.message,
+                  errorStack: callbackError?.stack,
+                  currentIndex,
+                  total: numImages,
+                  imageUrlLength: imageUrl?.length || 0
+                })
+                // 回调失败不影响继续生成
+              }
+            } else {
+              logger.warn('图片生成回调函数未提供，跳过流式发送 (GPTGod)', { 
+                currentIndex,
+                total: numImages,
+                imageUrlLength: imageUrl?.length || 0
+              })
+            }
+          }
+          
+          logger.debug('流式处理图片完成 (GPTGod)', {
+            processedCount: images.length,
+            allImagesCount: allImages.length
+          })
+          
           logger.success('GPTGod 图像编辑 API 调用成功', { current: i + 1, total: numImages })
           success = true
           break // 成功则退出重试循环

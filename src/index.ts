@@ -4,6 +4,7 @@ import { sanitizeError, sanitizeString } from './providers/utils'
 import { UserManager, RechargeRecord } from './services/UserManager'
 import { parseStyleCommandModifiers, buildModelMappingIndex } from './utils/parser'
 import { join } from 'path'
+import { YunwuVideoProvider } from './providers/yunwu-video'
 
 export const name = 'aka-ai-generator'
 
@@ -40,6 +41,13 @@ export interface StyleGroupConfig {
   prompts: StyleConfig[]
 }
 
+export interface VideoStyleConfig {
+  commandName: string
+  prompt: string
+  duration?: number
+  aspectRatio?: string
+}
+
 interface ResolvedStyleConfig extends StyleConfig {
   groupName?: string
 }
@@ -73,6 +81,15 @@ export interface Config {
   logLevel: 'info' | 'debug'
   securityBlockWindow: number
   securityBlockWarningThreshold: number
+  // 视频生成配置（独立于图像生成配置）
+  enableVideoGeneration: boolean
+  videoProvider: 'yunwu'  // 视频生成供应商（目前只支持 yunwu）
+  videoApiKey: string     // 视频生成 API 密钥
+  videoApiBase: string     // 视频生成 API 地址
+  videoModelId: string     // 视频生成模型ID
+  videoMaxWaitTime: number
+  videoCreditsMultiplier: number
+  videoStyles: VideoStyleConfig[]
 }
 
 const StyleItemSchema = Schema.object({
@@ -180,6 +197,57 @@ export const Config: Schema<Config> = Schema.intersect([
         .default([])
         .description('属于该类型的 prompt 列表')
     })).role('table').default({}).description('按类型管理的 prompt 组，键名即为分组名称')
+  }),
+  // 视频生成配置（独立于图像生成配置）
+  Schema.object({
+    enableVideoGeneration: Schema.boolean()
+      .default(false)
+      .description('启用图生成视频功能（消耗较大，需谨慎开启）'),
+    
+    videoProvider: Schema.union([
+      Schema.const('yunwu').description('云雾服务'),
+    ] as const)
+      .default('yunwu' as const)
+      .description('视频生成供应商（目前只支持云雾）'),
+    
+    videoApiKey: Schema.string()
+      .description('视频生成 API 密钥（独立于图像生成配置）')
+      .role('secret')
+      .default(''),
+    
+    videoApiBase: Schema.string()
+      .default('https://yunwu.ai')
+      .description('视频生成 API 地址'),
+    
+    videoModelId: Schema.string()
+      .default('sora-2')
+      .description('视频生成模型ID (sora-2 或 sora-2-pro)'),
+    
+    videoMaxWaitTime: Schema.number()
+      .default(300)
+      .min(60)
+      .max(600)
+      .description('视频生成最大等待时间（秒），超时后可异步查询'),
+    
+    videoCreditsMultiplier: Schema.number()
+      .default(5)
+      .min(1)
+      .max(20)
+      .description('视频生成积分倍数（相对于图片生成，默认5倍）'),
+    
+    videoStyles: Schema.array(Schema.object({
+      commandName: Schema.string().required().description('命令名称').role('table-cell', { width: 100 }),
+      prompt: Schema.string().role('textarea', { rows: 2 }).required().description('视频描述 prompt'),
+      duration: Schema.number().default(15).description('视频时长（秒，仅支持 15 或 25）'),
+      aspectRatio: Schema.string().description('宽高比（如 16:9）')
+    })).role('table').default([
+      {
+        commandName: '变视频',
+        prompt: '将该图片生成一段符合产品展现的流畅视频',
+        duration: 15,
+        aspectRatio: '16:9'
+      }
+    ]).description('视频风格预设')
   })
 ])
 
@@ -206,6 +274,28 @@ export function apply(ctx: Context, config: Config) {
   }
 
   const modelMappingIndex = buildModelMappingIndex(config.modelMappings)
+
+  // 创建视频 Provider 实例（如果启用）
+  let videoProvider: YunwuVideoProvider | null = null
+  if (config.enableVideoGeneration) {
+    // 验证视频配置
+    if (!config.videoApiKey) {
+      logger.warn('视频生成功能已启用，但未配置视频 API 密钥，视频功能将不可用')
+    } else if (config.videoProvider !== 'yunwu') {
+      logger.warn(`视频生成供应商 ${config.videoProvider} 暂不支持，仅支持 yunwu`)
+    } else {
+      videoProvider = new YunwuVideoProvider({
+        apiKey: config.videoApiKey,
+        modelId: config.videoModelId,
+        apiBase: config.videoApiBase,
+        apiTimeout: config.apiTimeout,
+        logLevel: config.logLevel,
+        logger,
+        ctx
+      })
+      logger.info(`视频生成功能已启用 (供应商: ${config.videoProvider}, 模型: ${config.videoModelId}, API: ${config.videoApiBase})`)
+    }
+  }
 
   // 获取动态风格指令
   const styleDefinitions = collectStyleDefinitions()
@@ -278,33 +368,36 @@ export function apply(ctx: Context, config: Config) {
     return input || null
   }
 
+  // 构建统计消息
+  function buildStatsMessage(userData: any, numImages: number, consumptionType: string, freeUsed: number, purchasedUsed: number, config: Config): string {
+    if (userManager.isAdmin(userData.userId, config)) {
+      return `📊 使用统计 [管理员]\n用户：${userData.userName}\n总调用次数：${userData.totalUsageCount}次\n状态：无限制使用`
+    }
+    
+    const remainingToday = Math.max(0, config.dailyFreeLimit - userData.dailyUsageCount)
+    let consumptionText = ''
+    if (consumptionType === 'mixed') {
+      consumptionText = `每日免费次数 -${freeUsed}，充值次数 -${purchasedUsed}`
+    } else if (consumptionType === 'free') {
+      consumptionText = `每日免费次数 -${freeUsed}`
+    } else {
+      consumptionText = `充值次数 -${purchasedUsed}`
+    }
+    
+    return `📊 使用统计\n用户：${userData.userName}\n本次生成：${numImages}张图片\n本次消费：${consumptionText}\n总调用次数：${userData.totalUsageCount}次\n今日剩余免费：${remainingToday}次\n充值剩余：${userData.remainingPurchasedCount}次`
+  }
+
   // 记录用户调用次数并发送统计信息（仅在成功时调用）
-  async function recordUserUsage(session: Session, commandName: string, numImages: number = 1) {
+  // @param sendStatsImmediately 是否立即发送统计信息，false 时异步发送（不阻塞）
+  async function recordUserUsage(session: Session, commandName: string, numImages: number = 1, sendStatsImmediately: boolean = true) {
     const userId = session.userId
     const userName = session.username || session.userId || '未知用户'
     if (!userId) return
 
-    // 扣减额度
+    // 扣减额度（不能失败）
     const { userData, consumptionType, freeUsed, purchasedUsed } = await userManager.consumeQuota(userId, userName, commandName, numImages, config)
 
-    // 发送统计信息
-    if (userManager.isAdmin(userId, config)) {
-      await session.send(`📊 使用统计 [管理员]\n用户：${userData.userName}\n总调用次数：${userData.totalUsageCount}次\n状态：无限制使用`)
-    } else {
-      const remainingToday = Math.max(0, config.dailyFreeLimit - userData.dailyUsageCount)
-      
-      let consumptionText = ''
-      if (consumptionType === 'mixed') {
-        consumptionText = `每日免费次数 -${freeUsed}，充值次数 -${purchasedUsed}`
-      } else if (consumptionType === 'free') {
-        consumptionText = `每日免费次数 -${freeUsed}`
-      } else {
-        consumptionText = `充值次数 -${purchasedUsed}`
-      }
-      
-      await session.send(`📊 使用统计\n用户：${userData.userName}\n本次生成：${numImages}张图片\n本次消费：${consumptionText}\n总调用次数：${userData.totalUsageCount}次\n今日剩余免费：${remainingToday}次\n充值剩余：${userData.remainingPurchasedCount}次`)
-    }
-
+    // 记录日志
     logger.info('用户调用记录', {
       userId,
       userName: userData.userName,
@@ -318,6 +411,29 @@ export function apply(ctx: Context, config: Config) {
       remainingPurchasedCount: userData.remainingPurchasedCount,
       isAdmin: userManager.isAdmin(userId, config)
     })
+
+    // 发送统计信息（可以失败，仅记录错误）
+    if (sendStatsImmediately) {
+      // 立即发送（同步阻塞）
+      try {
+        const statsMessage = buildStatsMessage(userData, numImages, consumptionType, freeUsed, purchasedUsed, config)
+        await session.send(statsMessage)
+      } catch (error) {
+        logger.warn('发送统计信息失败', { userId, error: sanitizeError(error) })
+        // 不抛出错误，允许继续执行
+      }
+    } else {
+      // 异步发送，不阻塞当前流程（优先发送图片）
+      setImmediate(async () => {
+        try {
+          const statsMessage = buildStatsMessage(userData, numImages, consumptionType, freeUsed, purchasedUsed, config)
+          await session.send(statsMessage)
+          logger.debug('统计信息已异步发送', { userId, commandName })
+        } catch (error) {
+          logger.warn('异步发送统计信息失败', { userId, error: sanitizeError(error) })
+        }
+      })
+    }
   }
 
   // 记录安全策略拦截并处理警示/扣除积分逻辑
@@ -458,19 +574,42 @@ export function apply(ctx: Context, config: Config) {
     return { images: collectedImages, text: collectedText }
   }
 
-  // 使用供应商生成图像
-  async function requestProviderImages(prompt: string, imageUrls: string | string[], numImages: number, requestContext?: ImageRequestContext): Promise<string[]> {
+  // 使用供应商生成图像（支持流式处理）
+  async function requestProviderImages(
+    prompt: string, 
+    imageUrls: string | string[], 
+    numImages: number, 
+    requestContext?: ImageRequestContext,
+    onImageGenerated?: (imageUrl: string, index: number, total: number) => void | Promise<void>
+  ): Promise<string[]> {
     const providerType = (requestContext?.provider || config.provider) as ProviderType
     const targetModelId = requestContext?.modelId
     const providerInstance = getProviderInstance(providerType, targetModelId)
-    if (config.logLevel === 'debug') {
-      logger.debug('准备调用图像供应商', {
+    
+    logger.info('requestProviderImages 调用', {
+      providerType,
+      modelId: targetModelId || 'default',
+      numImages,
+      hasCallback: !!onImageGenerated,
+      promptLength: prompt.length,
+      imageUrlsCount: Array.isArray(imageUrls) ? imageUrls.length : (imageUrls ? 1 : 0)
+    })
+    
+    try {
+      const result = await providerInstance.generateImages(prompt, imageUrls, numImages, onImageGenerated)
+      logger.info('requestProviderImages 完成', {
         providerType,
-        modelId: targetModelId || 'default',
-        numImages
+        resultCount: result.length
       })
+      return result
+    } catch (error) {
+      logger.error('requestProviderImages 失败', {
+        providerType,
+        error: sanitizeError(error),
+        errorMessage: error?.message
+      })
+      throw error
     }
-    return await providerInstance.generateImages(prompt, imageUrls, numImages)
   }
 
   // 带超时的通用图像处理函数
@@ -487,7 +626,7 @@ export function apply(ctx: Context, config: Config) {
         }, config.commandTimeout * 1000)
       )
     ]).catch(async error => {
-      if (userId) userManager.endTask(userId)
+      // 移除这里的 endTask，因为 processImage 的 finally 会处理
       const sanitizedError = sanitizeError(error)
       logger.error('图像处理超时或失败', { userId, error: sanitizedError })
       
@@ -617,40 +756,111 @@ export function apply(ctx: Context, config: Config) {
         // 调用图像编辑API
         await session.send(statusMessage)
 
-        const images = await requestProviderImages(finalPrompt, imageUrls, imageCount, requestContext)
+        // 流式处理：收集已生成的图片，并在生成时立即发送
+        const generatedImages: string[] = []
+        let creditDeducted = false
+
+        // 流式回调：每生成一张图片就立即发送
+        const onImageGenerated = async (imageUrl: string, index: number, total: number) => {
+          logger.info('流式回调被调用', { 
+            userId,
+            index,
+            total,
+            imageUrlType: typeof imageUrl,
+            imageUrlLength: imageUrl?.length || 0,
+            imageUrlPrefix: imageUrl?.substring(0, 50) || 'null',
+            hasImageUrl: !!imageUrl
+          })
+          
+          // 检查超时
+          if (checkTimeout && checkTimeout()) {
+            logger.error('流式回调：检测到超时', { userId, index, total })
+            throw new Error('命令执行超时')
+          }
+
+          generatedImages.push(imageUrl)
+          logger.debug('图片已添加到 generatedImages', { 
+            userId,
+            currentCount: generatedImages.length,
+            index,
+            total
+          })
+
+          // 1. 优先发送图片给用户（确保用户先看到结果）
+          logger.info('准备发送图片', { userId, index: index + 1, total, imageUrlLength: imageUrl?.length || 0 })
+          try {
+            await session.send(h.image(imageUrl))
+            logger.info('流式处理：图片已发送', { index: index + 1, total, userId })
+          } catch (sendError) {
+            logger.error('发送图片失败', { 
+              userId,
+              error: sanitizeError(sendError),
+              errorMessage: sendError?.message,
+              index: index + 1,
+              total
+            })
+            throw sendError // 重新抛出，让上层处理
+          }
+
+          // 2. 图片发送成功后，扣除积分（但不阻塞后续流程）
+          if (!creditDeducted && generatedImages.length > 0) {
+            creditDeducted = true
+            logger.info('准备扣除积分', { userId, totalImages: total, currentIndex: index })
+            try {
+              // 传入 false，让统计信息异步发送，不阻塞后续流程
+              await recordUserUsage(session, styleName, total, false)
+              logger.info('流式处理：积分已扣除', { 
+                userId, 
+                totalImages: total,
+                currentIndex: index 
+              })
+            } catch (creditError) {
+              logger.error('扣除积分失败', {
+                userId,
+                error: sanitizeError(creditError),
+                totalImages: total
+              })
+              // 图片已发送，积分扣除失败不影响用户体验，只记录错误
+            }
+          }
+
+          // 多张图片添加延时（最后一张不需要延时）
+          if (total > 1 && index < total - 1) {
+            logger.debug('多张图片，添加延时', { index, total })
+            await new Promise(resolve => setTimeout(resolve, 1000))
+          }
+        }
+
+        logger.info('准备调用 requestProviderImages，已设置回调函数', { 
+          userId,
+          hasCallback: !!onImageGenerated,
+          imageCount,
+          promptLength: finalPrompt.length,
+          imageUrlsCount: Array.isArray(imageUrls) ? imageUrls.length : (imageUrls ? 1 : 0)
+        })
+        const images = await requestProviderImages(finalPrompt, imageUrls, imageCount, requestContext, onImageGenerated)
+        logger.info('requestProviderImages 返回', { 
+          userId,
+          imagesCount: images.length,
+          generatedImagesCount: generatedImages.length,
+          creditDeducted
+        })
         
+        // 立即检查超时
         if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
 
         if (images.length === 0) {
           return '图像处理失败：未能生成图片'
         }
 
-        // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
-        // 提前记录，防止发送图片过程中因适配器无响应导致统计失败
-        await recordUserUsage(session, styleName, images.length)
+        // 如果流式处理中积分未扣除（理论上不应该发生），在这里扣除
+        if (!creditDeducted) {
+          // 使用异步发送，因为此时图片已经发送完成
+          await recordUserUsage(session, styleName, images.length, false)
+          logger.warn('流式处理：积分在最后扣除（异常情况）', { userId, imagesCount: images.length })
+        }
 
         await session.send('图像处理完成！')
-
-        // 发送生成的图片
-        for (let i = 0; i < images.length; i++) {
-          if (checkTimeout && checkTimeout()) break // 中断发送
-          
-          try {
-            // 给图片发送增加独立超时(20s)，防止适配器无响应导致任务挂起
-            await Promise.race([
-              session.send(h.image(images[i])),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('SendTimeout')), 20000))
-            ])
-          } catch (err) {
-             // 仅记录警告，不中断流程，因为图片可能已经发出去了只是没收到回包
-             logger.warn(`图片发送可能超时 (用户: ${userId}): ${err instanceof Error ? err.message : String(err)}`)
-          }
-
-          // 多张图片添加延时
-          if (images.length > 1 && i < images.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1000))
-          }
-        }
 
     } finally {
         userManager.endTask(userId)
@@ -684,8 +894,9 @@ export function apply(ctx: Context, config: Config) {
             // 确定要生成的图片数量（仅使用 -n 参数）
             const numImages = options?.num || config.defaultNumImages
 
-            // 检查每日调用限制（传入实际要生成的图片数量）
-            const limitCheck = await userManager.checkDailyLimit(session.userId!, config, numImages)
+            // 原子性地检查并预留额度（防止并发绕过）
+            const userName = session.username || session.userId || '未知用户'
+            const limitCheck = await userManager.checkAndReserveQuota(session.userId!, userName, numImages, config)
             if (!limitCheck.allowed) {
               return limitCheck.message
             }
@@ -726,6 +937,466 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
+  // 图生视频命令（基础）
+  if (config.enableVideoGeneration && videoProvider) {
+    ctx.command('图生视频 [img:text]', '根据图片和描述生成视频')
+      .option('duration', '-d <duration:number> 视频时长（15 或 25 秒）')
+      .option('ratio', '-r <ratio:string> 宽高比（16:9, 9:16, 1:1）')
+      .action(async ({ session, options }, img) => {
+        if (!session?.userId) return '会话无效'
+
+        const userId = session.userId
+        const userName = session.username || userId || '未知用户'
+
+        // 计算积分消耗
+        const videoCredits = config.videoCreditsMultiplier
+
+        // 检查并预留额度
+        const limitCheck = await userManager.checkAndReserveQuota(
+          userId,
+          userName,
+          videoCredits,
+          config
+        )
+        if (!limitCheck.allowed) {
+          return limitCheck.message
+        }
+
+        // 检查视频任务锁（独立于图像任务，不影响图像生成）
+        if (!userManager.startVideoTask(userId)) {
+          return '您有一个视频任务正在进行中，请等待完成'
+        }
+
+        let createdTaskId: string | null = null
+
+        try {
+
+          // 获取输入图片
+          const inputResult = await getInputData(session, img, 'single')
+          if ('error' in inputResult) {
+            return inputResult.error
+          }
+
+          const { images: imageUrls, text: extraText } = inputResult
+
+          if (imageUrls.length === 0) {
+            return '未检测到输入图片，请发送一张图片'
+          }
+
+          // 获取描述
+          let prompt = extraText || ''
+          if (!prompt) {
+            await session.send('请输入视频描述（描述视频中的动作和场景变化）\n提示：描述越详细，生成效果越好')
+            const promptMsg = await session.prompt(30000)
+            if (!promptMsg) {
+              return '等待超时'
+            }
+            const elements = h.parse(promptMsg)
+            const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
+            if (!text) {
+              return '未检测到描述'
+            }
+            prompt = text
+          }
+
+          // 验证时长参数（API 只支持 15 或 25 秒）
+          const duration = options?.duration || 15
+          if (duration !== 15 && duration !== 25) {
+            return '视频时长必须是 15 或 25 秒'
+          }
+
+          // 验证宽高比参数
+          const ratio = options?.ratio || '16:9'
+          const validRatios = ['16:9', '9:16', '1:1']
+          if (!validRatios.includes(ratio)) {
+            return `宽高比必须是以下之一: ${validRatios.join(', ')}`
+          }
+
+          // 创建视频任务（异步提交，不等待完成）
+          const taskId = await videoProvider.createVideoTask(
+            prompt,
+            imageUrls[0],
+            {
+              duration,
+              aspectRatio: ratio
+            }
+          )
+          createdTaskId = taskId
+
+          // 检查队列上限并添加待结算任务（默认max=1）
+          const addResult = await userManager.addPendingVideoTaskWithLimit({
+            taskId,
+            userId,
+            userName,
+            commandName: '图生视频',
+            credits: videoCredits,
+            createdAt: new Date().toISOString(),
+            charged: false
+          }, 1)
+
+          if (!addResult.success) {
+            // 队列已满，清理已创建的任务
+            try { await userManager.deletePendingVideoTask(taskId) } catch {}
+            return addResult.message || '队列已满，请先查询已有任务'
+          }
+
+          await session.send('开始生成视频...')
+
+          // 等待10秒后第一次查询，检测是否出错
+          await new Promise(resolve => setTimeout(resolve, 10000))
+          
+          try {
+            const firstStatus = await videoProvider.queryTaskStatus(taskId)
+            
+            // 如果第一次查询就失败了，立即返回错误
+            if (firstStatus.status === 'failed') {
+              const errorMsg = firstStatus.error || '视频生成失败'
+              await userManager.deletePendingVideoTask(taskId)
+              return `视频生成失败：${sanitizeString(errorMsg)}`
+            }
+            
+            // 如果已完成，直接发送视频并扣费
+            if (firstStatus.status === 'completed' && firstStatus.videoUrl) {
+              await session.send(h.video(firstStatus.videoUrl))
+              await recordUserUsage(session, '图生视频', videoCredits, false)
+              await userManager.markPendingVideoTaskCharged(taskId)
+              await userManager.deletePendingVideoTask(taskId)
+              return '视频生成完成！'
+            }
+            
+            // 如果正在生成，告诉用户并继续等待
+            await session.send('视频正在生成中，请稍候...')
+            
+          } catch (error: any) {
+            logger.error('第一次查询视频状态失败', { taskId, error: sanitizeError(error) })
+            // 查询失败不影响，继续等待
+          }
+
+          // 等待配置的最大等待时间
+          await new Promise(resolve => setTimeout(resolve, config.videoMaxWaitTime * 1000))
+          
+          // 第二次查询，检测视频是否生成
+          try {
+            const secondStatus = await videoProvider.queryTaskStatus(taskId)
+            
+            if (secondStatus.status === 'completed' && secondStatus.videoUrl) {
+              // 视频已生成，发送并扣费
+              await session.send(h.video(secondStatus.videoUrl))
+              await recordUserUsage(session, '图生视频', videoCredits, false)
+              await userManager.markPendingVideoTaskCharged(taskId)
+              await userManager.deletePendingVideoTask(taskId)
+              return '视频生成完成！'
+            } else if (secondStatus.status === 'failed') {
+              // 生成失败
+              const errorMsg = secondStatus.error || '视频生成失败'
+              await userManager.deletePendingVideoTask(taskId)
+              return `视频生成失败：${sanitizeString(errorMsg)}`
+            } else {
+              // 仍在生成中，提示用户后续查询
+              return '视频仍在生成中，请稍后使用"查询视频"指令获取结果'
+            }
+            
+          } catch (error: any) {
+            logger.error('第二次查询视频状态失败', { taskId, error: sanitizeError(error) })
+            // 查询失败，提示用户后续查询
+            return '视频生成中，请稍后使用"查询视频"指令获取结果'
+          }
+
+        } catch (error: any) {
+          logger.error('视频生成任务提交失败', { userId, error: sanitizeError(error) })
+          
+          // 清理已创建的任务（如果已创建）
+          if (createdTaskId) {
+            try { await userManager.deletePendingVideoTask(createdTaskId) } catch {}
+          }
+          
+          const errorMsg = error.message || ''
+          return `视频生成任务提交失败：${sanitizeString(errorMsg)}`
+        } finally {
+          userManager.endVideoTask(userId)
+        }
+      })
+  }
+
+  // 查询视频任务命令（taskId 可选：不传则查询用户所有待生成任务）
+  if (config.enableVideoGeneration && videoProvider) {
+    ctx.command('查询视频 [taskId:string]', '查询视频生成状态（不传任务ID则查询自己所有待生成任务）')
+      .action(async ({ session }, taskId) => {
+        if (!session?.userId) return '会话无效'
+
+        const trimmedTaskId = (taskId || '').trim()
+
+        // 如果指定了 taskId，查询单个任务
+        if (trimmedTaskId) {
+          try {
+            await session.send('正在查询视频生成状态...')
+
+            const status = await videoProvider.queryTaskStatus(trimmedTaskId)
+            const pending = await userManager.getPendingVideoTask(trimmedTaskId)
+
+            // 验证任务归属
+            if (pending && pending.userId && pending.userId !== session.userId) {
+              return '该任务ID不属于当前用户，无法查询'
+            }
+
+            if (status.status === 'completed' && status.videoUrl) {
+              await session.send(h.video(status.videoUrl))
+
+              // 若存在待结算记录，则在查询成功时补扣积分（避免超时套利）
+              if (pending && !pending.charged) {
+                await recordUserUsage(session, pending.commandName, pending.credits, false)
+                await userManager.markPendingVideoTaskCharged(trimmedTaskId)
+                await userManager.deletePendingVideoTask(trimmedTaskId)
+              }
+
+              return '视频生成完成！'
+            } else if (status.status === 'processing' || status.status === 'pending') {
+              const progressText = status.progress ? `（进度：${status.progress}%）` : ''
+              return `视频正在生成中${progressText}，请稍后再次查询`
+            } else if (status.status === 'failed') {
+              // 失败的任务移除但不扣费
+              if (pending && !pending.charged) {
+                await userManager.deletePendingVideoTask(trimmedTaskId)
+              }
+              return `视频生成失败：${status.error || '未知错误'}`
+            } else {
+              return `❓ 未知状态：${status.status}`
+            }
+
+          } catch (error: any) {
+            logger.error('查询视频任务失败', { taskId: trimmedTaskId, error: sanitizeError(error) })
+            return `查询失败：${sanitizeString(error.message)}`
+          }
+        }
+
+        // 未指定 taskId，查询用户所有待生成任务
+        try {
+          const pendingTasks = await userManager.listPendingVideoTasksForUser(session.userId)
+
+          if (pendingTasks.length === 0) {
+            return '你当前没有可查询的待生成视频任务'
+          }
+
+          await session.send(`正在查询 ${pendingTasks.length} 个视频任务状态...`)
+
+          let completedCount = 0
+          let processingCount = 0
+          let failedCount = 0
+          const messages: string[] = []
+
+          // 逐个查询任务状态
+          for (const task of pendingTasks) {
+            try {
+              const status = await videoProvider.queryTaskStatus(task.taskId)
+
+              if (status.status === 'completed' && status.videoUrl) {
+                // 发送视频并在发送后扣费
+                await session.send(h.video(status.videoUrl))
+                
+                if (!task.charged) {
+                  await recordUserUsage(session, task.commandName, task.credits, false)
+                  await userManager.markPendingVideoTaskCharged(task.taskId)
+                  await userManager.deletePendingVideoTask(task.taskId)
+                }
+                completedCount++
+                messages.push(`任务 ${task.taskId.substring(0, 20)}... 已完成`)
+              } else if (status.status === 'processing' || status.status === 'pending') {
+                processingCount++
+                const progressText = status.progress ? `（进度：${status.progress}%）` : ''
+                messages.push(`任务 ${task.taskId.substring(0, 20)}... 生成中${progressText}`)
+              } else if (status.status === 'failed') {
+                // 失败的任务移除但不扣费
+                if (!task.charged) {
+                  await userManager.deletePendingVideoTask(task.taskId)
+                }
+                failedCount++
+                messages.push(`任务 ${task.taskId.substring(0, 20)}... 失败：${status.error || '未知错误'}`)
+              } else {
+                messages.push(`❓ 任务 ${task.taskId.substring(0, 20)}... 状态：${status.status}`)
+              }
+            } catch (error: any) {
+              logger.error('查询单个视频任务失败', { taskId: task.taskId, error: sanitizeError(error) })
+              messages.push(`⚠️ 任务 ${task.taskId.substring(0, 20)}... 查询失败：${sanitizeString(error.message)}`)
+            }
+          }
+
+          // 汇总结果
+          let summary = `查询结果汇总：\n`
+          if (completedCount > 0) summary += `已完成：${completedCount} 个\n`
+          if (processingCount > 0) summary += `生成中：${processingCount} 个\n`
+          if (failedCount > 0) summary += `失败：${failedCount} 个\n`
+          summary += `\n${messages.join('\n')}`
+
+          return summary
+
+        } catch (error: any) {
+          logger.error('查询视频任务列表失败', { userId: session.userId, error: sanitizeError(error) })
+          return `查询失败：${sanitizeString(error.message)}`
+        }
+      })
+  }
+
+  // 动态注册视频风格命令
+  if (config.enableVideoGeneration && videoProvider && config.videoStyles?.length > 0) {
+    for (const style of config.videoStyles) {
+      if (!style.commandName || !style.prompt) continue
+
+      ctx.command(`${style.commandName} [img:text]`, '视频风格转换')
+        .action(async ({ session }, img) => {
+          if (!session?.userId) return '会话无效'
+
+          const userId = session.userId
+          const userName = session.username || userId || '未知用户'
+
+          // 计算积分消耗
+          const videoCredits = config.videoCreditsMultiplier
+
+          // 检查并预留额度
+          const limitCheck = await userManager.checkAndReserveQuota(
+            userId,
+            userName,
+            videoCredits,
+            config
+          )
+          if (!limitCheck.allowed) {
+            return limitCheck.message
+          }
+
+          // 检查视频任务锁（独立于图像任务，不影响图像生成）
+          if (!userManager.startVideoTask(userId)) {
+            return '您有一个视频任务正在进行中，请等待完成'
+          }
+
+          let createdTaskId: string | null = null
+
+          try {
+            // 获取输入图片
+            const inputResult = await getInputData(session, img, 'single')
+            if ('error' in inputResult) {
+              return inputResult.error
+            }
+
+            const { images: imageUrls, text: extraText } = inputResult
+
+            if (imageUrls.length === 0) {
+              return '未检测到输入图片，请发送一张图片'
+            }
+
+            // 构建最终 prompt（预设 + 用户追加）
+            let finalPrompt = style.prompt
+            if (extraText) {
+              finalPrompt += ' - ' + extraText
+            }
+
+            // 创建视频任务（异步提交，不等待完成）
+            const taskId = await videoProvider.createVideoTask(
+              finalPrompt,
+              imageUrls[0],
+              {
+                duration: style.duration || 15,
+                aspectRatio: style.aspectRatio || '16:9'
+              }
+            )
+            createdTaskId = taskId
+
+            // 检查队列上限并添加待结算任务（默认max=1）
+            const addResult = await userManager.addPendingVideoTaskWithLimit({
+              taskId,
+              userId,
+              userName,
+              commandName: style.commandName,
+              credits: videoCredits,
+              createdAt: new Date().toISOString(),
+              charged: false
+            }, 1)
+
+            if (!addResult.success) {
+              // 队列已满，清理已创建的任务
+              try { await userManager.deletePendingVideoTask(taskId) } catch {}
+              return addResult.message || '队列已满，请先查询已有任务'
+            }
+
+            await session.send(`开始生成视频（${style.commandName}）...`)
+
+            // 等待10秒后第一次查询，检测是否出错
+            await new Promise(resolve => setTimeout(resolve, 10000))
+            
+            try {
+              const firstStatus = await videoProvider.queryTaskStatus(taskId)
+              
+              // 如果第一次查询就失败了，立即返回错误
+              if (firstStatus.status === 'failed') {
+                const errorMsg = firstStatus.error || '视频生成失败'
+                await userManager.deletePendingVideoTask(taskId)
+                return `视频生成失败：${sanitizeString(errorMsg)}`
+              }
+              
+              // 如果已完成，直接发送视频并扣费
+              if (firstStatus.status === 'completed' && firstStatus.videoUrl) {
+                await session.send(h.video(firstStatus.videoUrl))
+                await recordUserUsage(session, style.commandName, videoCredits, false)
+                await userManager.markPendingVideoTaskCharged(taskId)
+                await userManager.deletePendingVideoTask(taskId)
+                return '视频生成完成！'
+              }
+              
+              // 如果正在生成，告诉用户并继续等待
+              await session.send('视频正在生成中，请稍候...')
+              
+            } catch (error: any) {
+              logger.error('第一次查询视频状态失败', { taskId, error: sanitizeError(error) })
+              // 查询失败不影响，继续等待
+            }
+
+            // 等待配置的最大等待时间
+            await new Promise(resolve => setTimeout(resolve, config.videoMaxWaitTime * 1000))
+            
+            // 第二次查询，检测视频是否生成
+            try {
+              const secondStatus = await videoProvider.queryTaskStatus(taskId)
+              
+              if (secondStatus.status === 'completed' && secondStatus.videoUrl) {
+                // 视频已生成，发送并扣费
+                await session.send(h.video(secondStatus.videoUrl))
+                await recordUserUsage(session, style.commandName, videoCredits, false)
+                await userManager.markPendingVideoTaskCharged(taskId)
+                await userManager.deletePendingVideoTask(taskId)
+                return '视频生成完成！'
+              } else if (secondStatus.status === 'failed') {
+                // 生成失败
+                const errorMsg = secondStatus.error || '视频生成失败'
+                await userManager.deletePendingVideoTask(taskId)
+                return `视频生成失败：${sanitizeString(errorMsg)}`
+              } else {
+                // 仍在生成中，提示用户后续查询
+                return '视频仍在生成中，请稍后使用"查询视频"指令获取结果'
+              }
+              
+            } catch (error: any) {
+              logger.error('第二次查询视频状态失败', { taskId, error: sanitizeError(error) })
+              // 查询失败，提示用户后续查询
+              return '视频生成中，请稍后使用"查询视频"指令获取结果'
+            }
+
+          } catch (error: any) {
+            logger.error('视频风格转换任务提交失败', { userId, style: style.commandName, error: sanitizeError(error) })
+            
+            // 清理已创建的任务（如果已创建）
+            if (createdTaskId) {
+              try { await userManager.deletePendingVideoTask(createdTaskId) } catch {}
+            }
+            
+            const errorMsg = error.message || ''
+            return `视频生成任务提交失败：${sanitizeString(errorMsg)}`
+          } finally {
+            userManager.endVideoTask(userId)
+          }
+        })
+
+      logger.info(`已注册视频风格命令: ${style.commandName}`)
+    }
+  }
+
   // 文生图命令
   ctx.command(`${COMMANDS.TXT_TO_IMG} [prompt:text]`, '根据文字描述生成图像')
     .option('num', '-n <num:number> 生成图片数量 (1-4)')
@@ -733,8 +1404,9 @@ export function apply(ctx: Context, config: Config) {
       if (!session?.userId) return '会话无效'
       const numImages = options?.num || config.defaultNumImages
       
-      // 检查每日调用限制
-      const limitCheck = await userManager.checkDailyLimit(session.userId!, config, numImages)
+      // 原子性地检查并预留额度（防止并发绕过）
+      const userName = session.username || session.userId || '未知用户'
+      const limitCheck = await userManager.checkAndReserveQuota(session.userId!, userName, numImages, config)
       if (!limitCheck.allowed) {
         return limitCheck.message
       }
@@ -755,8 +1427,9 @@ export function apply(ctx: Context, config: Config) {
       const numImages = options?.num || config.defaultNumImages
       const mode = options?.multiple ? 'multiple' : 'single'
 
-      // 检查每日调用限制
-      const limitCheck = await userManager.checkDailyLimit(session.userId!, config, numImages)
+      // 原子性地检查并预留额度（防止并发绕过）
+      const userName = session.username || session.userId || '未知用户'
+      const limitCheck = await userManager.checkAndReserveQuota(session.userId!, userName, numImages, config)
       if (!limitCheck.allowed) {
         return limitCheck.message
       }
@@ -776,24 +1449,14 @@ export function apply(ctx: Context, config: Config) {
       if (!session?.userId) return '会话无效'
       const userId = session.userId
 
-      // 检查是否已有任务进行
+      // 直接加锁，不要先检查再释放再加锁
       if (!userManager.startTask(userId)) {
         return '您有一个图像处理任务正在进行中，请等待完成'
       }
 
-      // 需要手动释放任务锁，因为 processImageWithTimeout 内部也会加锁，这里为了复用逻辑需要特殊处理
-      // 实际上这里因为需要自定义交互流程，不能直接复用 processImage 的前半部分
-      // 简单的做法是：这里只做交互，获取到数据后，调用 processImageWithTimeout
-      // 但 processImageWithTimeout 又会去获取输入数据，这会冲突
-      
-      // 修正：我们手动实现合成图的超时控制，不使用 processImageWithTimeout
-      userManager.endTask(userId) // 先释放，下面重新加锁
-
       let isTimeout = false
       return Promise.race([
         (async () => {
-          if (!userManager.startTask(userId)) return '您有一个图像处理任务正在进行中'
-
           try {
             // 等待用户发送多张图片和prompt
             await session.send('多张图片+描述')
@@ -860,8 +1523,9 @@ export function apply(ctx: Context, config: Config) {
               return '生成数量必须在 1-4 之间'
             }
 
-            // 检查每日调用限制（传入实际要生成的图片数量）
-            const limitCheck = await userManager.checkDailyLimit(userId, config, imageCount)
+            // 原子性地检查并预留额度（防止并发绕过）
+            const userName = session.username || userId || '未知用户'
+            const limitCheck = await userManager.checkAndReserveQuota(userId, userName, imageCount, config)
             if (!limitCheck.allowed) {
               return limitCheck.message
             }
@@ -879,38 +1543,111 @@ export function apply(ctx: Context, config: Config) {
             // 调用图像编辑API（支持多张图片）
             await session.send(`开始合成图（${collectedImages.length}张）...\nPrompt: ${prompt}`)
 
-            const resultImages = await requestProviderImages(prompt, collectedImages, imageCount)
+            // 流式处理：收集已生成的图片，并在生成时立即发送
+            const generatedImages: string[] = []
+            let creditDeducted = false
+
+            // 流式回调：每生成一张图片就立即发送
+            const onImageGenerated = async (imageUrl: string, index: number, total: number) => {
+              logger.info('流式回调被调用 (COMPOSE_IMAGE)', { 
+                userId,
+                index,
+                total,
+                imageUrlType: typeof imageUrl,
+                imageUrlLength: imageUrl?.length || 0,
+                imageUrlPrefix: imageUrl?.substring(0, 50) || 'null',
+                hasImageUrl: !!imageUrl
+              })
+              
+              // 检查超时
+              if (isTimeout) {
+                logger.error('流式回调：检测到超时 (COMPOSE_IMAGE)', { userId, index, total })
+                throw new Error('命令执行超时')
+              }
+
+              generatedImages.push(imageUrl)
+              logger.debug('图片已添加到 generatedImages (COMPOSE_IMAGE)', { 
+                userId,
+                currentCount: generatedImages.length,
+                index,
+                total
+              })
+
+              // 1. 优先发送图片给用户（确保用户先看到结果）
+              logger.info('准备发送图片 (COMPOSE_IMAGE)', { userId, index: index + 1, total, imageUrlLength: imageUrl?.length || 0 })
+              try {
+                await session.send(h.image(imageUrl))
+                logger.info('流式处理：图片已发送 (COMPOSE_IMAGE)', { index: index + 1, total, userId })
+              } catch (sendError) {
+                logger.error('发送图片失败 (COMPOSE_IMAGE)', { 
+                  userId,
+                  error: sanitizeError(sendError),
+                  errorMessage: sendError?.message,
+                  index: index + 1,
+                  total
+                })
+                throw sendError // 重新抛出，让上层处理
+              }
+
+              // 2. 图片发送成功后，扣除积分（但不阻塞后续流程）
+              if (!creditDeducted && generatedImages.length > 0) {
+                creditDeducted = true
+                logger.info('准备扣除积分 (COMPOSE_IMAGE)', { userId, totalImages: total, currentIndex: index })
+                try {
+                  // 传入 false，让统计信息异步发送，不阻塞后续流程
+                  await recordUserUsage(session, COMMANDS.COMPOSE_IMAGE, total, false)
+                  logger.info('流式处理：积分已扣除 (COMPOSE_IMAGE)', { 
+                    userId, 
+                    totalImages: total,
+                    currentIndex: index 
+                  })
+                } catch (creditError) {
+                  logger.error('扣除积分失败 (COMPOSE_IMAGE)', {
+                    userId,
+                    error: sanitizeError(creditError),
+                    totalImages: total
+                  })
+                  // 图片已发送，积分扣除失败不影响用户体验，只记录错误
+                }
+              }
+
+              // 多张图片添加延时（最后一张不需要延时）
+              if (total > 1 && index < total - 1) {
+                logger.debug('多张图片，添加延时 (COMPOSE_IMAGE)', { index, total })
+                await new Promise(resolve => setTimeout(resolve, 1000))
+              }
+            }
+
+            logger.info('准备调用 requestProviderImages (COMPOSE_IMAGE)，已设置回调函数', { 
+              userId,
+              hasCallback: !!onImageGenerated,
+              imageCount,
+              promptLength: prompt.length,
+              collectedImagesCount: collectedImages.length
+            })
+            const resultImages = await requestProviderImages(prompt, collectedImages, imageCount, undefined, onImageGenerated)
+            logger.info('requestProviderImages 返回 (COMPOSE_IMAGE)', { 
+              userId,
+              imagesCount: resultImages.length,
+              generatedImagesCount: generatedImages.length,
+              creditDeducted
+            })
             
+            // 立即检查超时
             if (isTimeout) throw new Error('命令执行超时')
 
             if (resultImages.length === 0) {
               return '图片合成失败：未能生成图片'
             }
 
-            // 成功处理图片后记录使用统计（按实际生成的图片数量计费）
-            // 提前记录，防止发送图片过程中因适配器无响应导致统计失败
-            await recordUserUsage(session, COMMANDS.COMPOSE_IMAGE, resultImages.length)
+            // 如果流式处理中积分未扣除（理论上不应该发生），在这里扣除
+            if (!creditDeducted) {
+              // 使用异步发送，因为此时图片已经发送完成
+              await recordUserUsage(session, COMMANDS.COMPOSE_IMAGE, resultImages.length, false)
+              logger.warn('流式处理：积分在最后扣除（异常情况）', { userId, imagesCount: resultImages.length })
+            }
 
             await session.send('图片合成完成！')
-
-            // 发送生成的图片
-            for (let i = 0; i < resultImages.length; i++) {
-              if (isTimeout) break
-              
-              try {
-                // 给图片发送增加独立超时(20s)，防止适配器无响应导致任务挂起
-                await Promise.race([
-                  session.send(h.image(resultImages[i])),
-                  new Promise((_, reject) => setTimeout(() => reject(new Error('SendTimeout')), 20000))
-                ])
-              } catch (err) {
-                 logger.warn(`图片合成发送可能超时 (用户: ${userId}): ${err instanceof Error ? err.message : String(err)}`)
-              }
-
-              if (resultImages.length > 1 && i < resultImages.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1000))
-              }
-            }
 
           } finally {
             userManager.endTask(userId)
@@ -923,7 +1660,7 @@ export function apply(ctx: Context, config: Config) {
           }, config.commandTimeout * 1000)
         )
       ]).catch(async error => {
-        if (userId) userManager.endTask(userId)
+        // 不需要再次 endTask，finally 已处理
         const sanitizedError = sanitizeError(error)
         logger.error('图片合成超时或失败', { userId, error: sanitizedError })
         
@@ -1241,6 +1978,19 @@ export function apply(ctx: Context, config: Config) {
         commandRegistry.userCommands.forEach(cmd => {
           result += `• ${cmd.name} - ${cmd.description}\n`
         })
+
+        // 如果启用了视频生成功能，显示视频功能
+        if (config.enableVideoGeneration) {
+          result += '\n🎥 视频生成功能：\n'
+          result += '• 图生视频 - 根据图片和描述生成视频\n'
+          result += '• 查询视频 - 根据任务ID查询视频状态\n'
+          
+          if (config.videoStyles?.length > 0) {
+            config.videoStyles.forEach(style => {
+              result += `• ${style.commandName} - 视频风格预设\n`
+            })
+          }
+        }
 
         // 如果用户是管理员，显示管理员指令
         if (userIsAdmin) {

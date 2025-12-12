@@ -65,3 +65,5 @@ export function createImageProvider(config: ProviderFactoryConfig): ImageProvide
 export { ImageProvider } from './types'
 export { GptGodProvider } from './gptgod'
 export { GeminiProvider } from './gemini'
+export { VideoProvider, VideoTaskStatus, VideoGenerationOptions } from './types'
+export { YunwuVideoProvider } from './yunwu-video'
