@@ -1,4 +1,4 @@
-import { Argv, h, Session } from 'koishi'
+import { Argv, h } from 'koishi'
 import { ModelMappingConfig } from '../index'
 
 interface StyleCommandModifiers {
@@ -32,8 +32,8 @@ export function buildModelMappingIndex(mappings?: ModelMappingConfig[]) {
  * 解析风格命令修饰符
  */
 export function parseStyleCommandModifiers(
-  argv: Argv, 
-  imgParam: any, 
+  argv: Argv,
+  imgParam: any,
   modelMappingIndex: Map<string, ModelMappingConfig>
 ): StyleCommandModifiers {
   // 优先从 session.content 解析原始文本，以支持被 Koishi 误吞的参数（如 -add, -4k）

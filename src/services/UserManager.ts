@@ -101,7 +101,7 @@ export class UserManager {
   private dataLock = new AsyncLock()
   private historyLock = new AsyncLock()
   private pendingLock = new AsyncLock()
-  
+
   // 内存缓存
   private usersCache: UsersData | null = null
   private pendingVideoCache: PendingVideoTasksData | null = null
@@ -157,7 +157,7 @@ export class UserManager {
   }
 
   // --- 权限管理 ---
-  
+
   isAdmin(userId: string, config: Config): boolean {
     return config.adminUsers && config.adminUsers.includes(userId)
   }
@@ -344,30 +344,30 @@ export class UserManager {
    * 添加待结算视频任务，并检查上限（默认max=1）
    * @returns {Promise<{success: boolean, message?: string}>} 成功返回 {success: true}，失败返回 {success: false, message: '错误信息'}
    */
-  async addPendingVideoTaskWithLimit(task: PendingVideoTask, max: number = 1): Promise<{success: boolean, message?: string}> {
+  async addPendingVideoTaskWithLimit(task: PendingVideoTask, max: number = 1): Promise<{ success: boolean, message?: string }> {
     await this.loadPendingVideoTasks()
     return await this.pendingLock.acquire(async () => {
       if (!this.pendingVideoCache) {
         this.pendingVideoCache = { version: '1.0.0', lastUpdate: new Date().toISOString(), tasks: {} }
       }
-      
+
       // 检查该用户未扣费任务数量
       const currentCount = Object.values(this.pendingVideoCache.tasks)
         .filter(t => t.userId === task.userId && !t.charged)
         .length
-      
+
       if (currentCount >= max) {
         return {
           success: false,
           message: `您当前已有 ${currentCount} 个视频正在生成中（最多允许 ${max} 个），请先使用"查询视频"查看进度或等待完成`
         }
       }
-      
+
       // 幂等：若已存在则不覆盖（避免重复写入）
       if (this.pendingVideoCache.tasks[task.taskId]) {
         return { success: true } // 已存在，视为成功
       }
-      
+
       this.pendingVideoCache.tasks[task.taskId] = task
       await this.savePendingVideoTasksInternal()
       return { success: true }
@@ -378,91 +378,91 @@ export class UserManager {
   async getUserData(userId: string, userName: string): Promise<UserData> {
     await this.loadUsersData()
     // 此时 this.usersCache 一定不为 null
-    
+
     if (!this.usersCache![userId]) {
-        // 在锁内创建新用户，防止并发创建覆盖
-        await this.dataLock.acquire(async () => {
-            if (this.usersCache![userId]) return // 双重检查
-            
-            this.usersCache![userId] = {
-                userId,
-                userName,
-                totalUsageCount: 0,
-                dailyUsageCount: 0,
-                lastDailyReset: new Date().toISOString(),
-                purchasedCount: 0,
-                remainingPurchasedCount: 0,
-                donationCount: 0,
-                donationAmount: 0,
-                lastUsed: new Date().toISOString(),
-                createdAt: new Date().toISOString()
-            }
-            await this.saveUsersDataInternal()
-            this.logger.info('创建新用户数据', { userId, userName })
-        })
+      // 在锁内创建新用户，防止并发创建覆盖
+      await this.dataLock.acquire(async () => {
+        if (this.usersCache![userId]) return // 双重检查
+
+        this.usersCache![userId] = {
+          userId,
+          userName,
+          totalUsageCount: 0,
+          dailyUsageCount: 0,
+          lastDailyReset: new Date().toISOString(),
+          purchasedCount: 0,
+          remainingPurchasedCount: 0,
+          donationCount: 0,
+          donationAmount: 0,
+          lastUsed: new Date().toISOString(),
+          createdAt: new Date().toISOString()
+        }
+        await this.saveUsersDataInternal()
+        this.logger.info('创建新用户数据', { userId, userName })
+      })
     }
-    
+
     return this.usersCache![userId]
   }
-  
+
   // 获取所有用户数据 (用于充值等批量操作)
   async getAllUsers(): Promise<UsersData> {
-      return await this.loadUsersData()
+    return await this.loadUsersData()
   }
-  
+
   // 批量更新用户数据 (用于充值)
   async updateUsersBatch(updates: (data: UsersData) => void): Promise<void> {
-      // 在锁外先确保数据已加载（避免死锁）
-      await this.loadUsersData()
-      
-      await this.dataLock.acquire(async () => {
-          // 在锁内直接使用缓存，不再调用 loadUsersData（避免死锁）
-          if (!this.usersCache) {
-              this.logger.error('updateUsersBatch: usersCache 为空，这不应该发生')
-              this.usersCache = {}
-          }
-          updates(this.usersCache!)
-          await this.saveUsersDataInternal()
-      })
+    // 在锁外先确保数据已加载（避免死锁）
+    await this.loadUsersData()
+
+    await this.dataLock.acquire(async () => {
+      // 在锁内直接使用缓存，不再调用 loadUsersData（避免死锁）
+      if (!this.usersCache) {
+        this.logger.error('updateUsersBatch: usersCache 为空，这不应该发生')
+        this.usersCache = {}
+      }
+      updates(this.usersCache!)
+      await this.saveUsersDataInternal()
+    })
   }
 
   // --- 充值历史 ---
 
   async loadRechargeHistory(): Promise<RechargeHistory> {
     return await this.historyLock.acquire(async () => {
-        try {
-            if (existsSync(this.rechargeHistoryFile)) {
-                const data = await fs.readFile(this.rechargeHistoryFile, 'utf-8')
-                return JSON.parse(data)
-            }
-        } catch (error) {
-            this.logger.error('读取充值历史失败', error)
+      try {
+        if (existsSync(this.rechargeHistoryFile)) {
+          const data = await fs.readFile(this.rechargeHistoryFile, 'utf-8')
+          return JSON.parse(data)
         }
-        return {
-            version: '1.0.0',
-            lastUpdate: new Date().toISOString(),
-            records: []
-        }
+      } catch (error) {
+        this.logger.error('读取充值历史失败', error)
+      }
+      return {
+        version: '1.0.0',
+        lastUpdate: new Date().toISOString(),
+        records: []
+      }
     })
   }
 
   async addRechargeRecord(record: RechargeRecord): Promise<void> {
-      await this.historyLock.acquire(async () => {
-          let history: RechargeHistory
-          try {
-              if (existsSync(this.rechargeHistoryFile)) {
-                  history = JSON.parse(await fs.readFile(this.rechargeHistoryFile, 'utf-8'))
-              } else {
-                  history = { version: '1.0.0', lastUpdate: '', records: [] }
-              }
-          } catch (e) {
-              history = { version: '1.0.0', lastUpdate: '', records: [] }
-          }
-          
-          history.records.push(record)
-          history.lastUpdate = new Date().toISOString()
-          await fs.writeFile(this.rechargeHistoryFile, JSON.stringify(history, null, 2), 'utf-8')
-      })
+    await this.historyLock.acquire(async () => {
+      let history: RechargeHistory
+      try {
+        if (existsSync(this.rechargeHistoryFile)) {
+          history = JSON.parse(await fs.readFile(this.rechargeHistoryFile, 'utf-8'))
+        } else {
+          history = { version: '1.0.0', lastUpdate: '', records: [] }
+        }
+      } catch (e) {
+        history = { version: '1.0.0', lastUpdate: '', records: [] }
+      }
+
+      history.records.push(record)
+      history.lastUpdate = new Date().toISOString()
+      await fs.writeFile(this.rechargeHistoryFile, JSON.stringify(history, null, 2), 'utf-8')
+    })
   }
 
   // --- 限流逻辑 ---
@@ -474,7 +474,7 @@ export class UserManager {
 
     // 清理过期的时间戳
     const validTimestamps = userTimestamps.filter(timestamp => timestamp > windowStart)
-    
+
     // 更新缓存
     this.rateLimitMap.set(userId, validTimestamps)
 
@@ -510,7 +510,7 @@ export class UserManager {
     this.updateRateLimit(userId)
 
     const userData = await this.getUserData(userId, userId) // 获取或初始化
-    
+
     // 注意：getUserData 返回的是缓存对象的引用，直接读取是安全的，但修改需要加锁
     // 但这里我们只是读取来做判断，真正的扣减在 updateUserData
 
@@ -524,9 +524,9 @@ export class UserManager {
     }
 
     if (numImages > config.dailyFreeLimit && userData.totalUsageCount === 0 && userData.purchasedCount === 0) {
-        // 特殊情况：新用户且一次性请求超过免费额度
-        // 但其实 getUserData 会初始化 totalUsageCount=0
-        // 这里的逻辑主要是为了给用户友好的提示
+      // 特殊情况：新用户且一次性请求超过免费额度
+      // 但其实 getUserData 会初始化 totalUsageCount=0
+      // 这里的逻辑主要是为了给用户友好的提示
     }
 
     const remainingToday = Math.max(0, config.dailyFreeLimit - dailyCount)
@@ -545,13 +545,20 @@ export class UserManager {
 
   // 原子性地检查并预留额度（防止并发绕过）
   async checkAndReserveQuota(
-    userId: string, 
+    userId: string,
     userName: string,
-    numImages: number, 
-    config: Config
+    numImages: number,
+    config: Config,
+    platform?: string  // 新增：平台参数，用于检查平台免配额
   ): Promise<{ allowed: boolean; message?: string; reservationId?: string }> {
+    // 管理员免配额
     if (this.isAdmin(userId, config)) {
       return { allowed: true, reservationId: 'admin' }
+    }
+
+    // 平台免配额（如飞书/lark）
+    if (platform && config.unlimitedPlatforms?.includes(platform)) {
+      return { allowed: true, reservationId: 'platform_exempt' }
     }
 
     const rateLimitCheck = this.checkRateLimit(userId, config)
@@ -564,21 +571,21 @@ export class UserManager {
     // 在锁外先获取用户数据（避免死锁）
     await this.loadUsersData()
     const userData = await this.getUserData(userId, userName)
-    
+
     return await this.dataLock.acquire(async () => {
       // 在锁内直接使用缓存中的数据（避免死锁）
       // 确保缓存存在
       if (!this.usersCache) {
-          this.logger.error('checkAndReserveQuota: usersCache 为空，这不应该发生')
-          this.usersCache = {}
+        this.logger.error('checkAndReserveQuota: usersCache 为空，这不应该发生')
+        this.usersCache = {}
       }
-      
+
       // 重新获取用户数据（从缓存中，确保是最新的）
       const cachedUserData = this.usersCache[userId] || userData
-      
+
       const today = new Date().toDateString()
       const lastReset = new Date(cachedUserData.lastDailyReset || cachedUserData.createdAt).toDateString()
-      
+
       let dailyCount = cachedUserData.dailyUsageCount
       if (today !== lastReset) {
         dailyCount = 0
@@ -600,92 +607,134 @@ export class UserManager {
     })
   }
 
+  // 只记录调用次数，不扣减配额（用于管理员和平台免配额用户）
+  async recordUsageOnly(userId: string, userName: string, commandName: string, numImages: number): Promise<UserData> {
+    // 在锁外先确保数据已加载（避免死锁）
+    await this.loadUsersData()
+
+    return await this.dataLock.acquire(async () => {
+      if (!this.usersCache) {
+        this.logger.error('recordUsageOnly: usersCache 为空，这不应该发生')
+        this.usersCache = {}
+      }
+
+      let userData = this.usersCache![userId]
+      const now = new Date().toISOString()
+
+      if (!userData) {
+        userData = {
+          userId,
+          userName: userName || userId,
+          totalUsageCount: 0,
+          dailyUsageCount: 0,
+          lastDailyReset: now,
+          purchasedCount: 0,
+          remainingPurchasedCount: 0,
+          donationCount: 0,
+          donationAmount: 0,
+          lastUsed: now,
+          createdAt: now
+        }
+        this.usersCache![userId] = userData
+      }
+
+      // 只增加总调用次数，不扣减免费/充值额度
+      userData.totalUsageCount += numImages
+      userData.lastUsed = now
+
+      await this.saveUsersDataInternal()
+      this.logger.debug('recordUsageOnly: 仅记录调用次数', { userId, userName, commandName, numImages, totalUsageCount: userData.totalUsageCount })
+
+      return userData
+    })
+  }
+
   // 扣减额度并记录使用
   async consumeQuota(userId: string, userName: string, commandName: string, numImages: number, config: Config): Promise<{ userData: UserData, consumptionType: 'free' | 'purchased' | 'mixed', freeUsed: number, purchasedUsed: number }> {
     // 在锁外先确保数据已加载（避免死锁）
     await this.loadUsersData()
-    
+
     return await this.dataLock.acquire(async () => {
-        // 在锁内直接使用缓存，不再调用 loadUsersData（避免死锁）
-        // 确保缓存存在（理论上已经加载，但为了安全起见）
-        if (!this.usersCache) {
-            this.logger.error('consumeQuota: usersCache 为空，这不应该发生')
-            this.usersCache = {}
+      // 在锁内直接使用缓存，不再调用 loadUsersData（避免死锁）
+      // 确保缓存存在（理论上已经加载，但为了安全起见）
+      if (!this.usersCache) {
+        this.logger.error('consumeQuota: usersCache 为空，这不应该发生')
+        this.usersCache = {}
+      }
+
+      let userData = this.usersCache![userId]
+      const now = new Date().toISOString()
+      const today = new Date().toDateString()
+
+      if (!userData) {
+        // 理论上不会发生，因为前面 checkDailyLimit 应该已经创建了
+        // 但为了安全起见
+        userData = {
+          userId,
+          userName: userName || userId,
+          totalUsageCount: 0,
+          dailyUsageCount: 0,
+          lastDailyReset: now,
+          purchasedCount: 0,
+          remainingPurchasedCount: 0,
+          donationCount: 0,
+          donationAmount: 0,
+          lastUsed: now,
+          createdAt: now
         }
-        
-        let userData = this.usersCache![userId]
-        const now = new Date().toISOString()
-        const today = new Date().toDateString()
-        
-        if (!userData) {
-            // 理论上不会发生，因为前面 checkDailyLimit 应该已经创建了
-            // 但为了安全起见
-             userData = {
-                userId,
-                userName: userName || userId,
-                totalUsageCount: 0,
-                dailyUsageCount: 0,
-                lastDailyReset: now,
-                purchasedCount: 0,
-                remainingPurchasedCount: 0,
-                donationCount: 0,
-                donationAmount: 0,
-                lastUsed: now,
-                createdAt: now
-            }
-            this.usersCache![userId] = userData
-        }
+        this.usersCache![userId] = userData
+      }
 
-        userData.totalUsageCount += numImages
-        userData.lastUsed = now
+      userData.totalUsageCount += numImages
+      userData.lastUsed = now
 
-        // 重置每日计数
-        const lastReset = new Date(userData.lastDailyReset || userData.createdAt).toDateString()
-        if (today !== lastReset) {
-            userData.dailyUsageCount = 0
-            userData.lastDailyReset = now
-        }
+      // 重置每日计数
+      const lastReset = new Date(userData.lastDailyReset || userData.createdAt).toDateString()
+      if (today !== lastReset) {
+        userData.dailyUsageCount = 0
+        userData.lastDailyReset = now
+      }
 
-        let remainingToConsume = numImages
-        let freeUsed = 0
-        let purchasedUsed = 0
+      let remainingToConsume = numImages
+      let freeUsed = 0
+      let purchasedUsed = 0
 
-        // 优先消耗免费次数
-        const availableFree = Math.max(0, config.dailyFreeLimit - userData.dailyUsageCount)
-        if (availableFree > 0) {
-            const freeToUse = Math.min(availableFree, remainingToConsume)
-            userData.dailyUsageCount += freeToUse
-            freeUsed = freeToUse
-            remainingToConsume -= freeToUse
-        }
+      // 优先消耗免费次数
+      const availableFree = Math.max(0, config.dailyFreeLimit - userData.dailyUsageCount)
+      if (availableFree > 0) {
+        const freeToUse = Math.min(availableFree, remainingToConsume)
+        userData.dailyUsageCount += freeToUse
+        freeUsed = freeToUse
+        remainingToConsume -= freeToUse
+      }
 
-        // 消耗充值次数
-        if (remainingToConsume > 0) {
-            const purchasedToUse = Math.min(userData.remainingPurchasedCount, remainingToConsume)
-            userData.remainingPurchasedCount -= purchasedToUse
-            purchasedUsed = purchasedToUse
-            remainingToConsume -= purchasedToUse
-        }
-        
-        await this.saveUsersDataInternal()
+      // 消耗充值次数
+      if (remainingToConsume > 0) {
+        const purchasedToUse = Math.min(userData.remainingPurchasedCount, remainingToConsume)
+        userData.remainingPurchasedCount -= purchasedToUse
+        purchasedUsed = purchasedToUse
+        remainingToConsume -= purchasedToUse
+      }
 
-        let consumptionType: 'free' | 'purchased' | 'mixed'
-        if (freeUsed > 0 && purchasedUsed > 0) {
-            consumptionType = 'mixed'
-        } else if (freeUsed > 0) {
-            consumptionType = 'free'
-        } else {
-            consumptionType = 'purchased'
-        }
+      await this.saveUsersDataInternal()
 
-        return { userData, consumptionType, freeUsed, purchasedUsed }
+      let consumptionType: 'free' | 'purchased' | 'mixed'
+      if (freeUsed > 0 && purchasedUsed > 0) {
+        consumptionType = 'mixed'
+      } else if (freeUsed > 0) {
+        consumptionType = 'free'
+      } else {
+        consumptionType = 'purchased'
+      }
+
+      return { userData, consumptionType, freeUsed, purchasedUsed }
     })
   }
 
   // 记录安全拦截
   async recordSecurityBlock(userId: string, config: Config): Promise<{ shouldWarn: boolean, shouldDeduct: boolean, blockCount: number }> {
     if (!userId) return { shouldWarn: false, shouldDeduct: false, blockCount: 0 }
-    
+
     // 管理员豁免
     if (this.isAdmin(userId, config)) return { shouldWarn: false, shouldDeduct: false, blockCount: 0 }
 
@@ -705,11 +754,11 @@ export class UserManager {
     let shouldDeduct = false
 
     if (blockCount >= config.securityBlockWarningThreshold && !hasWarning) {
-        this.securityWarningMap.set(userId, true)
-        shouldWarn = true
+      this.securityWarningMap.set(userId, true)
+      shouldWarn = true
     } else if (blockCount > config.securityBlockWarningThreshold) {
-        // 修改：超过阈值后，每次都扣除积分（而不是只有 hasWarning 才扣）
-        shouldDeduct = true
+      // 修改：超过阈值后，每次都扣除积分（而不是只有 hasWarning 才扣）
+      shouldDeduct = true
     }
 
     return { shouldWarn, shouldDeduct, blockCount }
