@@ -22,8 +22,8 @@ const COMMANDS = {
   RECHARGE: '图像充值',
   RECHARGE_ALL: '活动充值',
   RECHARGE_HISTORY: '图像充值记录',
-  FUNCTION_LIST: '图像功能',
-  IMAGE_COMMANDS: '图像指令'
+  IMAGE_COMMANDS: '图像指令',
+  VIDEO_COMMANDS: '视频指令'
 } as const
 
 export type ImageProvider = 'yunwu' | 'gptgod' | 'gemini'
@@ -193,13 +193,13 @@ export const Config: Schema<Config> = Schema.intersect([
   // ===== 5. 模型映射 =====
   Schema.object({
     modelMappings: Schema.array(Schema.object({
-      suffix: Schema.string().required().description('指令后缀（例如 4K，对应输入 -4K）'),
+      suffix: Schema.string().required().description('切换模型参数名'),
       provider: Schema.union([
         Schema.const('yunwu').description('云雾 Gemini 服务'),
         Schema.const('gptgod').description('GPTGod 服务'),
         Schema.const('gemini').description('Google Gemini 原生'),
-      ] as const).description('可选：覆盖供应商'),
-      modelId: Schema.string().required().description('触发该后缀时使用的模型 ID')
+      ] as const).description('覆盖供应商'),
+      modelId: Schema.string().required().description('模型ID')
     })).role('table').default([]).description('根据 -后缀切换模型/供应商'),
   }).description('🔀 模型映射'),
 
@@ -1241,9 +1241,6 @@ export function apply(ctx: Context, config: Config) {
             if (modifiers.customAdditions?.length) {
               userPromptParts.push(...modifiers.customAdditions)
             }
-            if (modifiers.customPromptSuffix) {
-              userPromptParts.push(modifiers.customPromptSuffix)
-            }
             const userPromptText = userPromptParts.join(' - ')
 
             // 确定要生成的图片数量（仅使用 -n 参数）
@@ -2258,70 +2255,6 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  // 图像功能列表命令
-  ctx.command(COMMANDS.FUNCTION_LIST, '查看所有可用的图像处理功能')
-    .action(async ({ session }) => {
-      if (!session?.userId) return '会话无效'
-
-      try {
-        // 获取当前用户的管理员状态
-        const userIsAdmin = userManager.isAdmin(session.userId, config)
-
-        let result = '🎨 图像处理功能列表\n\n'
-
-        // 显示非管理员指令
-        result += '📝 用户指令：\n'
-        commandRegistry.userCommands.forEach(cmd => {
-          result += `• ${cmd.name} - ${cmd.description}\n`
-        })
-
-        // 如果启用了视频生成功能，显示视频功能
-        if (config.enableVideoGeneration) {
-          result += '\n🎥 视频生成功能：\n'
-          result += '• 图生视频 - 根据图片和描述生成视频\n'
-          result += '• 查询视频 - 根据任务ID查询视频状态\n'
-
-          if (config.videoStyles?.length > 0) {
-            config.videoStyles.forEach(style => {
-              result += `• ${style.commandName} - 视频风格预设\n`
-            })
-          }
-        }
-
-        // 如果用户是管理员，显示管理员指令
-        if (userIsAdmin) {
-          result += '\n🔧 管理员指令：\n'
-          commandRegistry.adminCommands.forEach(cmd => {
-            result += `• ${cmd.name} - ${cmd.description}\n`
-          })
-        }
-
-        result += '\n💡 使用提示：\n'
-        result += '• 发送图片后使用相应指令进行图像处理\n'
-        result += '• 支持直接传参：.指令名 [图片] 参数\n'
-        result += '• 支持交互式输入：.指令名 然后按提示操作\n'
-
-        if (userIsAdmin) {
-          result += '\n🔑 管理员提示：\n'
-          result += '• 可使用所有功能，无使用限制\n'
-          result += '• 可以查看充值记录\n'
-          result += '• 可以为其他用户充值次数\n'
-        } else {
-          result += '\n👤 普通用户提示：\n'
-          result += '• 每日有免费使用次数限制\n'
-          result += '• 可使用充值次数进行额外调用\n'
-          result += '• 使用 .图像额度 查看剩余次数\n'
-        }
-
-        return result
-
-      } catch (error) {
-        logger.error('获取功能列表失败', error)
-        return '获取功能列表失败，请稍后重试'
-      }
-    })
-
-
   // 图像指令列表命令
   ctx.command(COMMANDS.IMAGE_COMMANDS, '查看图像生成指令列表')
     .action(async ({ session }) => {
@@ -2346,6 +2279,55 @@ export function apply(ctx: Context, config: Config) {
         .forEach(cmd => {
           lines.push(`${prefix}${cmd.name} - ${cmd.description}`)
         })
+
+      lines.push('\n🧩 图像参数说明：')
+      lines.push('• -n <num> - 生成图片数量 (1-4)')
+      lines.push('• -m - 允许多图输入（仅图生图指令支持）')
+      lines.push('• -add <文本> - 追加用户自定义描述段')
+      if (config.modelMappings?.length) {
+        config.modelMappings.forEach(mapping => {
+          if (!mapping?.suffix || !mapping?.modelId) return
+          lines.push(`• -${mapping.suffix} - 图像生成模型切换为 ${mapping.modelId}`)
+        })
+      }
+
+      return lines.join('\n')
+    })
+
+  // 视频指令列表命令
+  ctx.command(COMMANDS.VIDEO_COMMANDS, '查看视频生成指令列表')
+    .action(async ({ session }) => {
+      if (!session?.userId) return '会话无效'
+
+      if (!config.enableVideoGeneration) {
+        return '视频生成功能未启用'
+      }
+
+      // 获取全局 prefix
+      const globalConfig = ctx.root.config as any
+      const prefixConfig = globalConfig.prefix
+
+      let prefix = ''
+      if (Array.isArray(prefixConfig) && prefixConfig.length > 0) {
+        prefix = prefixConfig[0]
+      } else if (typeof prefixConfig === 'string') {
+        prefix = prefixConfig
+      }
+
+      const lines = ['🎥 视频生成指令列表：\n']
+
+      lines.push(`${prefix}图生视频 - 根据图片和描述生成视频`)
+      lines.push(`${prefix}查询视频 - 根据任务ID查询视频状态`)
+
+      if (config.videoStyles?.length > 0) {
+        config.videoStyles.forEach(style => {
+          lines.push(`${prefix}${style.commandName} - 视频风格预设`)
+        })
+      }
+
+      lines.push('\n🧩 视频参数说明：')
+      lines.push('• -d <duration> - 视频时长（15 或 25 秒）')
+      lines.push('• -r <ratio> - 宽高比（16:9, 9:16, 1:1）')
 
       return lines.join('\n')
     })

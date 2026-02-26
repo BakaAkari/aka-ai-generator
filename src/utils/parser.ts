@@ -3,7 +3,6 @@ import { ModelMappingConfig } from '../index'
 
 interface StyleCommandModifiers {
   modelMapping?: ModelMappingConfig
-  customPromptSuffix?: string
   customAdditions?: string[]
 }
 
@@ -78,14 +77,6 @@ export function parseStyleCommandModifiers(
 
     const lower = token.toLowerCase()
 
-    // -prompt:xxx 形式
-    if (lower.startsWith('-prompt:')) {
-      const promptHead = token.substring(token.indexOf(':') + 1)
-      const restTokens = argsList.slice(index + 1)
-      modifiers.customPromptSuffix = [promptHead, ...restTokens].join(' ').trim()
-      break
-    }
-
     // -add <文本...> 追加用户自定义段
     if (lower === '-add') {
       index++
@@ -98,7 +89,6 @@ export function parseStyleCommandModifiers(
           // 检查是否是有效的 flag
           const key = normalizeSuffix(nextToken)
           if (key && modelMappingIndex.has(key)) break
-          if (nextToken.toLowerCase().startsWith('-prompt:')) break
           if (nextToken.toLowerCase() === '-add') break
         }
         additionTokens.push(nextToken)
