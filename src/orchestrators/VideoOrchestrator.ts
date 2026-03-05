@@ -44,9 +44,27 @@ export async function runVideoGenerationFlow(params: RunVideoGenerationFlowParam
 
   let createdTaskId: string | null = null
 
+  const logVideoEvent = (
+    level: 'info' | 'warn' | 'error',
+    message: string,
+    payload: Record<string, any> = {}
+  ) => {
+    logger[level](message, {
+      userId,
+      command: commandName,
+      taskId: createdTaskId,
+      ...payload
+    })
+  }
+
   try {
     const taskId = await videoProvider.createVideoTask(prompt, imageUrl, videoOptions)
     createdTaskId = taskId
+
+    logVideoEvent('info', '视频任务已创建', {
+      status: 'PENDING',
+      charged: false
+    })
 
     const addResult = await userManager.addPendingVideoTaskWithLimit({
       taskId,
@@ -60,6 +78,11 @@ export async function runVideoGenerationFlow(params: RunVideoGenerationFlowParam
 
     if (!addResult.success) {
       try { await userManager.deletePendingVideoTask(taskId) } catch { }
+      logVideoEvent('warn', '视频任务入队失败', {
+        status: 'FAILED',
+        charged: false,
+        reason: addResult.message
+      })
       return addResult.message || '队列已满，请先查询已有任务'
     }
 
@@ -73,6 +96,11 @@ export async function runVideoGenerationFlow(params: RunVideoGenerationFlowParam
       if (firstStatus.status === 'failed') {
         const errorMsg = firstStatus.error || '视频生成失败'
         await userManager.deletePendingVideoTask(taskId)
+        logVideoEvent('warn', '视频任务首次查询失败', {
+          status: 'FAILED',
+          charged: false,
+          error: sanitizeString(errorMsg)
+        })
         return `视频生成失败：${sanitizeString(errorMsg)}`
       }
 
@@ -81,12 +109,25 @@ export async function runVideoGenerationFlow(params: RunVideoGenerationFlowParam
         await recordUserUsage(session, commandName, videoCredits, false)
         await userManager.markPendingVideoTaskCharged(taskId)
         await userManager.deletePendingVideoTask(taskId)
+        logVideoEvent('info', '视频任务首次查询即完成并结算', {
+          status: 'CHARGED',
+          charged: true
+        })
         return '视频生成完成！'
       }
 
+      logVideoEvent('info', '视频任务首次查询处理中', {
+        status: firstStatus.status?.toUpperCase?.() || 'PROCESSING',
+        charged: false
+      })
+
       await session.send('视频正在生成中，请稍候...')
     } catch (error: any) {
-      logger.error('第一次查询视频状态失败', { taskId, error: sanitizeError(error) })
+      logVideoEvent('error', '第一次查询视频状态失败', {
+        status: 'PROCESSING',
+        charged: false,
+        error: sanitizeError(error)
+      })
     }
 
     await new Promise(resolve => setTimeout(resolve, maxWaitTime * 1000))
@@ -99,22 +140,44 @@ export async function runVideoGenerationFlow(params: RunVideoGenerationFlowParam
         await recordUserUsage(session, commandName, videoCredits, false)
         await userManager.markPendingVideoTaskCharged(taskId)
         await userManager.deletePendingVideoTask(taskId)
+        logVideoEvent('info', '视频任务二次查询完成并结算', {
+          status: 'CHARGED',
+          charged: true
+        })
         return '视频生成完成！'
       }
 
       if (secondStatus.status === 'failed') {
         const errorMsg = secondStatus.error || '视频生成失败'
         await userManager.deletePendingVideoTask(taskId)
+        logVideoEvent('warn', '视频任务二次查询失败', {
+          status: 'FAILED',
+          charged: false,
+          error: sanitizeString(errorMsg)
+        })
         return `视频生成失败：${sanitizeString(errorMsg)}`
       }
 
+      logVideoEvent('info', '视频任务仍在处理中，等待用户后续查询', {
+        status: secondStatus.status?.toUpperCase?.() || 'PROCESSING',
+        charged: false
+      })
+
       return '视频仍在生成中，请稍后使用"查询视频"指令获取结果'
     } catch (error: any) {
-      logger.error('第二次查询视频状态失败', { taskId, error: sanitizeError(error) })
+      logVideoEvent('error', '第二次查询视频状态失败', {
+        status: 'PROCESSING',
+        charged: false,
+        error: sanitizeError(error)
+      })
       return '视频生成中，请稍后使用"查询视频"指令获取结果'
     }
   } catch (error: any) {
-    logger.error('视频生成任务提交失败', { userId, error: sanitizeError(error), commandName })
+    logVideoEvent('error', '视频生成任务提交失败', {
+      status: 'FAILED',
+      charged: false,
+      error: sanitizeError(error)
+    })
 
     if (createdTaskId) {
       try { await userManager.deletePendingVideoTask(createdTaskId) } catch { }
@@ -126,4 +189,3 @@ export async function runVideoGenerationFlow(params: RunVideoGenerationFlowParam
     userManager.endVideoTask(userId)
   }
 }
-

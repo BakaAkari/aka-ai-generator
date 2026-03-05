@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-aka-ai-generator",
   "description": "自用AI生成插件(GPTGod & Yunwu)",
-  "version": "0.9.20",
+  "version": "0.9.22",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -11,7 +11,12 @@
   "license": "MIT",
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test:video-orchestrator": "npx -y tsx ./src/orchestrators/VideoOrchestrator.spec.ts",
+    "test:utils": "npx -y tsx ./src/providers/utils.spec.ts",
+    "test:user-manager": "npx -y tsx ./src/services/UserManager.spec.ts",
+    "test:input": "npx -y tsx ./src/utils/input.spec.ts",
+    "test": "npm run test:video-orchestrator && npm run test:utils && npm run test:user-manager && npm run test:input"
   },
   "keywords": [
     "chatbot",

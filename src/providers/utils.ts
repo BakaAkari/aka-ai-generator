@@ -7,6 +7,15 @@ import Jimp from 'jimp'
 export function sanitizeError(error: any): any {
   if (!error) return error
 
+  // Error 对象的 message/stack/name 多为不可枚举属性，需显式提取
+  if (error instanceof Error) {
+    return {
+      name: sanitizeString(error.name || 'Error'),
+      message: sanitizeString(error.message || ''),
+      stack: sanitizeString(error.stack || '')
+    }
+  }
+
   // 如果是字符串，尝试清理其中的 API KEY
   if (typeof error === 'string') {
     return sanitizeString(error)

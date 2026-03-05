@@ -3,6 +3,7 @@ import { createImageProvider, ProviderType } from './providers'
 import { sanitizeError, sanitizeString } from './providers/utils'
 import { UserManager, RechargeRecord } from './services/UserManager'
 import { parseStyleCommandModifiers, buildModelMappingIndex } from './utils/parser'
+import { collectImagesFromParamAndQuote, parseMessageImagesAndText } from './utils/input'
 import { join } from 'path'
 import { YunwuVideoProvider } from './providers/yunwu-video'
 import { runVideoGenerationFlow } from './orchestrators/VideoOrchestrator'
@@ -441,24 +442,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   async function getStyleTransferImages(session: Session, imgParam: any): Promise<{ images: string[] } | { error: string }> {
-    const collectedImages: string[] = []
-
-    if (imgParam) {
-      if (typeof imgParam === 'object' && imgParam.attrs?.src) {
-        collectedImages.push(imgParam.attrs.src)
-      } else if (typeof imgParam === 'string') {
-        if (imgParam.startsWith('http') || imgParam.startsWith('data:')) {
-          collectedImages.push(imgParam)
-        }
-      }
-    }
-
-    if (session.quote?.elements) {
-      const quoteImages = h.select(session.quote.elements, 'img')
-      for (const img of quoteImages) {
-        if (img.attrs.src) collectedImages.push(img.attrs.src)
-      }
-    }
+    const collectedImages: string[] = collectImagesFromParamAndQuote(session, imgParam)
 
     if (collectedImages.length > 2) {
       return { error: '本功能仅支持两张图片，检测到多张图片' }
@@ -474,9 +458,7 @@ export function apply(ctx: Context, config: Config) {
       const msg = await session.prompt(30000)
       if (!msg) return { error: '等待超时' }
 
-      const elements = h.parse(msg)
-      const images = h.select(elements, 'img')
-      const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
+      const { images, text } = parseMessageImagesAndText(msg)
 
       if (images.length === 0) {
         return { error: text ? '未检测到图片，本功能需要两张图片' : '未检测到图片' }
@@ -623,7 +605,7 @@ export function apply(ctx: Context, config: Config) {
 
   // 获取输入数据（支持单图/多图/纯文本）
   async function getInputData(session: Session, imgParam: any, mode: 'single' | 'multiple' | 'text'): Promise<{ images: string[], text?: string } | { error: string }> {
-    const collectedImages: string[] = []
+    const collectedImages: string[] = collectImagesFromParamAndQuote(session, imgParam)
     let collectedText = ''
 
     // 0. 纯文本模式处理
@@ -639,38 +621,15 @@ export function apply(ctx: Context, config: Config) {
       const msg = await session.prompt(30000)
       if (!msg) return { error: '等待超时' }
 
-      const elements = h.parse(msg)
-      const images = h.select(elements, 'img')
+      const { images, text } = parseMessageImagesAndText(msg)
       if (images.length > 0) {
         return { error: '检测到图片，本功能仅支持文字输入' }
       }
-
-      const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
 
       if (!text) {
         return { error: '未检测到描述，操作已取消' }
       }
       return { images: [], text }
-    }
-
-    // 1. 从命令参数获取
-    if (imgParam) {
-      if (typeof imgParam === 'object' && imgParam.attrs?.src) {
-        collectedImages.push(imgParam.attrs.src)
-      } else if (typeof imgParam === 'string') {
-        // 简单的URL检查
-        if (imgParam.startsWith('http') || imgParam.startsWith('data:')) {
-          collectedImages.push(imgParam)
-        }
-      }
-    }
-
-    // 2. 从引用消息获取
-    if (session.quote?.elements) {
-      const quoteImages = h.select(session.quote.elements, 'img')
-      for (const img of quoteImages) {
-        if (img.attrs.src) collectedImages.push(img.attrs.src)
-      }
     }
 
     // 如果已经有图片，直接返回
@@ -692,35 +651,7 @@ export function apply(ctx: Context, config: Config) {
       const msg = await session.prompt(mode === 'multiple' ? 60000 : 30000)
       if (!msg) return { error: '等待超时' }
 
-      // 调试日志：查看原始消息和平台信息
-      logger.info('getInputData 收到消息', {
-        platform: session.platform,
-        msgType: typeof msg,
-        msgLength: msg?.length,
-        msgPreview: typeof msg === 'string' ? msg.substring(0, 200) : 'non-string',
-        rawMsg: msg
-      })
-
-      const elements = h.parse(msg)
-
-      // 调试日志：查看解析后的元素
-      logger.info('getInputData 解析元素', {
-        platform: session.platform,
-        elementsCount: elements?.length,
-        elementTypes: elements?.map(e => e.type),
-        elementsDetail: JSON.stringify(elements?.slice(0, 5))
-      })
-
-      const images = h.select(elements, 'img')
-
-      // 调试日志：查看选择的图片元素
-      logger.info('getInputData 图片元素', {
-        platform: session.platform,
-        imagesCount: images?.length,
-        imagesAttrs: images?.map(img => ({ src: img.attrs?.src?.substring(0, 100), allAttrs: Object.keys(img.attrs || {}) }))
-      })
-      const textElements = h.select(elements, 'text')
-      const text = textElements.map(el => el.attrs.content).join(' ').trim()
+      const { images, text } = parseMessageImagesAndText(msg)
 
       if (images.length > 0) {
         for (const img of images) {
@@ -880,6 +811,166 @@ export function apply(ctx: Context, config: Config) {
     })
   }
 
+  async function executeImageGenerationCore(
+    session: any,
+    styleName: string,
+    finalPrompt: string,
+    imageCount: number,
+    imageUrlsInput: string[],
+    requestContext?: ImageRequestContext,
+    displayInfo?: { customAdditions?: string[], modelId?: string, modelDescription?: string },
+    checkTimeout?: () => boolean,
+    verboseLogs: boolean = false
+  ): Promise<string> {
+    const userId = session.userId
+    const providerType = (requestContext?.provider || config.provider) as ProviderType
+    const providerModelId = requestContext?.modelId || (providerType === 'yunwu' ? config.yunwuModelId : config.gptgodModelId)
+
+    logger.info('开始图像处理', {
+      userId,
+      imageUrls: imageUrlsInput,
+      styleName,
+      prompt: finalPrompt,
+      numImages: imageCount,
+      provider: providerType,
+      modelId: providerModelId
+    })
+
+    let statusMessage = `开始处理图片（${styleName}）`
+    const infoParts: string[] = []
+
+    if (displayInfo?.customAdditions && displayInfo.customAdditions.length > 0) {
+      infoParts.push(`自定义内容：${displayInfo.customAdditions.join('；')}`)
+    }
+
+    if (displayInfo?.modelId) {
+      const modelDesc = displayInfo.modelDescription || displayInfo.modelId
+      infoParts.push(`使用模型：${modelDesc}`)
+    }
+
+    if (infoParts.length > 0) {
+      statusMessage += `\n${infoParts.join('\n')}`
+    }
+
+    statusMessage += '...'
+    await session.send(statusMessage)
+
+    const generatedImages: string[] = []
+    let creditDeducted = false
+
+    const onImageGenerated = async (imageUrl: string, index: number, total: number) => {
+      if (verboseLogs) {
+        logger.info('流式回调被调用', {
+          userId,
+          index,
+          total,
+          imageUrlType: typeof imageUrl,
+          imageUrlLength: imageUrl?.length || 0,
+          imageUrlPrefix: imageUrl?.substring(0, 50) || 'null',
+          hasImageUrl: !!imageUrl
+        })
+      }
+
+      if (checkTimeout && checkTimeout()) {
+        logger.error('流式回调：检测到超时', { userId, index, total })
+        throw new Error('命令执行超时')
+      }
+
+      generatedImages.push(imageUrl)
+
+      if (verboseLogs) {
+        logger.debug('图片已添加到 generatedImages', {
+          userId,
+          currentCount: generatedImages.length,
+          index,
+          total
+        })
+        logger.info('准备发送图片', { userId, index: index + 1, total, imageUrlLength: imageUrl?.length || 0 })
+      }
+
+      try {
+        await session.send(h.image(imageUrl))
+        if (verboseLogs) {
+          logger.info('流式处理：图片已发送', { index: index + 1, total, userId })
+        }
+      } catch (sendError) {
+        logger.error('发送图片失败', {
+          userId,
+          error: sanitizeError(sendError),
+          errorMessage: sendError?.message,
+          index: index + 1,
+          total
+        })
+        throw sendError
+      }
+
+      if (!creditDeducted && generatedImages.length > 0) {
+        creditDeducted = true
+        if (verboseLogs) {
+          logger.info('准备扣除积分', { userId, totalImages: total, currentIndex: index })
+        }
+        try {
+          await recordUserUsage(session, styleName, total, false)
+          if (verboseLogs) {
+            logger.info('流式处理：积分已扣除', {
+              userId,
+              totalImages: total,
+              currentIndex: index
+            })
+          }
+        } catch (creditError) {
+          logger.error('扣除积分失败', {
+            userId,
+            error: sanitizeError(creditError),
+            totalImages: total
+          })
+        }
+      }
+
+      if (total > 1 && index < total - 1) {
+        if (verboseLogs) {
+          logger.debug('多张图片，添加延时', { index, total })
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
+    }
+
+    if (verboseLogs) {
+      logger.info('准备调用 requestProviderImages，已设置回调函数', {
+        userId,
+        hasCallback: !!onImageGenerated,
+        imageCount,
+        promptLength: finalPrompt.length,
+        imageUrlsCount: Array.isArray(imageUrlsInput) ? imageUrlsInput.length : (imageUrlsInput ? 1 : 0)
+      })
+    }
+
+    const images = await requestProviderImages(finalPrompt, imageUrlsInput, imageCount, requestContext, onImageGenerated)
+
+    if (verboseLogs) {
+      logger.info('requestProviderImages 返回', {
+        userId,
+        imagesCount: images.length,
+        generatedImagesCount: generatedImages.length,
+        creditDeducted
+      })
+    }
+
+    if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
+
+    if (images.length === 0) {
+      return '图像处理失败：未能生成图片'
+    }
+
+    if (!creditDeducted) {
+      await recordUserUsage(session, styleName, images.length, false)
+      logger.warn('流式处理：积分在最后扣除（异常情况）', { userId, imagesCount: images.length })
+    }
+
+    await session.send('图像处理完成！')
+    return ''
+  }
+
   async function processPresetImages(
     session: any,
     imageUrls: string[],
@@ -914,95 +1005,8 @@ export function apply(ctx: Context, config: Config) {
       }
 
       if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
-
-      const providerType = (requestContext?.provider || config.provider) as ProviderType
-      const providerModelId = requestContext?.modelId || (providerType === 'yunwu' ? config.yunwuModelId : config.gptgodModelId)
-
-      logger.info('开始图像处理', {
-        userId,
-        imageUrls,
-        styleName,
-        prompt: finalPrompt,
-        numImages: imageCount,
-        provider: providerType,
-        modelId: providerModelId
-      })
-
-      let statusMessage = `开始处理图片（${styleName}）`
-      const infoParts: string[] = []
-
-      if (displayInfo?.customAdditions && displayInfo.customAdditions.length > 0) {
-        infoParts.push(`自定义内容：${displayInfo.customAdditions.join('；')}`)
-      }
-
-      if (displayInfo?.modelId) {
-        const modelDesc = displayInfo.modelDescription || displayInfo.modelId
-        infoParts.push(`使用模型：${modelDesc}`)
-      }
-
-      if (infoParts.length > 0) {
-        statusMessage += `\n${infoParts.join('\n')}`
-      }
-
-      statusMessage += '...'
-      await session.send(statusMessage)
-
-      const generatedImages: string[] = []
-      let creditDeducted = false
-
-      const onImageGenerated = async (imageUrl: string, index: number, total: number) => {
-        if (checkTimeout && checkTimeout()) {
-          logger.error('流式回调：检测到超时', { userId, index, total })
-          throw new Error('命令执行超时')
-        }
-
-        generatedImages.push(imageUrl)
-
-        try {
-          await session.send(h.image(imageUrl))
-        } catch (sendError) {
-          logger.error('发送图片失败', {
-            userId,
-            error: sanitizeError(sendError),
-            errorMessage: sendError?.message,
-            index: index + 1,
-            total
-          })
-          throw sendError
-        }
-
-        if (!creditDeducted && generatedImages.length > 0) {
-          creditDeducted = true
-          try {
-            await recordUserUsage(session, styleName, total, false)
-          } catch (creditError) {
-            logger.error('扣除积分失败', {
-              userId,
-              error: sanitizeError(creditError),
-              totalImages: total
-            })
-          }
-        }
-
-        if (total > 1 && index < total - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000))
-        }
-      }
-
-      const images = await requestProviderImages(finalPrompt, imageUrls, imageCount, requestContext, onImageGenerated)
-
-      if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
-
-      if (images.length === 0) {
-        return '图像处理失败：未能生成图片'
-      }
-
-      if (!creditDeducted) {
-        await recordUserUsage(session, styleName, images.length, false)
-        logger.warn('流式处理：积分在最后扣除（异常情况）', { userId, imagesCount: images.length })
-      }
-
-      await session.send('图像处理完成！')
+      const result = await executeImageGenerationCore(session, styleName, finalPrompt, imageCount, imageUrls, requestContext, displayInfo, checkTimeout, false)
+      if (result) return result
     } finally {
       userManager.endTask(userId)
     }
@@ -1075,147 +1079,8 @@ export function apply(ctx: Context, config: Config) {
       }
 
       if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
-
-      const providerType = (requestContext?.provider || config.provider) as ProviderType
-      const providerModelId = requestContext?.modelId || (providerType === 'yunwu' ? config.yunwuModelId : config.gptgodModelId)
-
-      logger.info('开始图像处理', {
-        userId,
-        imageUrls,
-        styleName,
-        prompt: finalPrompt,
-        numImages: imageCount,
-        provider: providerType,
-        modelId: providerModelId
-      })
-
-      // 构建提示信息
-      let statusMessage = `开始处理图片（${styleName}）`
-      const infoParts: string[] = []
-
-      if (displayInfo?.customAdditions && displayInfo.customAdditions.length > 0) {
-        infoParts.push(`自定义内容：${displayInfo.customAdditions.join('；')}`)
-      }
-
-      if (displayInfo?.modelId) {
-        const modelDesc = displayInfo.modelDescription || displayInfo.modelId
-        infoParts.push(`使用模型：${modelDesc}`)
-      }
-
-      if (infoParts.length > 0) {
-        statusMessage += `\n${infoParts.join('\n')}`
-      }
-
-      statusMessage += '...'
-
-      // 调用图像编辑API
-      await session.send(statusMessage)
-
-      // 流式处理：收集已生成的图片，并在生成时立即发送
-      const generatedImages: string[] = []
-      let creditDeducted = false
-
-      // 流式回调：每生成一张图片就立即发送
-      const onImageGenerated = async (imageUrl: string, index: number, total: number) => {
-        logger.info('流式回调被调用', {
-          userId,
-          index,
-          total,
-          imageUrlType: typeof imageUrl,
-          imageUrlLength: imageUrl?.length || 0,
-          imageUrlPrefix: imageUrl?.substring(0, 50) || 'null',
-          hasImageUrl: !!imageUrl
-        })
-
-        // 检查超时
-        if (checkTimeout && checkTimeout()) {
-          logger.error('流式回调：检测到超时', { userId, index, total })
-          throw new Error('命令执行超时')
-        }
-
-        generatedImages.push(imageUrl)
-        logger.debug('图片已添加到 generatedImages', {
-          userId,
-          currentCount: generatedImages.length,
-          index,
-          total
-        })
-
-        // 1. 优先发送图片给用户（确保用户先看到结果）
-        logger.info('准备发送图片', { userId, index: index + 1, total, imageUrlLength: imageUrl?.length || 0 })
-        try {
-          await session.send(h.image(imageUrl))
-          logger.info('流式处理：图片已发送', { index: index + 1, total, userId })
-        } catch (sendError) {
-          logger.error('发送图片失败', {
-            userId,
-            error: sanitizeError(sendError),
-            errorMessage: sendError?.message,
-            index: index + 1,
-            total
-          })
-          throw sendError // 重新抛出，让上层处理
-        }
-
-        // 2. 图片发送成功后，扣除积分（但不阻塞后续流程）
-        if (!creditDeducted && generatedImages.length > 0) {
-          creditDeducted = true
-          logger.info('准备扣除积分', { userId, totalImages: total, currentIndex: index })
-          try {
-            // 传入 false，让统计信息异步发送，不阻塞后续流程
-            await recordUserUsage(session, styleName, total, false)
-            logger.info('流式处理：积分已扣除', {
-              userId,
-              totalImages: total,
-              currentIndex: index
-            })
-          } catch (creditError) {
-            logger.error('扣除积分失败', {
-              userId,
-              error: sanitizeError(creditError),
-              totalImages: total
-            })
-            // 图片已发送，积分扣除失败不影响用户体验，只记录错误
-          }
-        }
-
-        // 多张图片添加延时（最后一张不需要延时）
-        if (total > 1 && index < total - 1) {
-          logger.debug('多张图片，添加延时', { index, total })
-          await new Promise(resolve => setTimeout(resolve, 1000))
-        }
-      }
-
-      logger.info('准备调用 requestProviderImages，已设置回调函数', {
-        userId,
-        hasCallback: !!onImageGenerated,
-        imageCount,
-        promptLength: finalPrompt.length,
-        imageUrlsCount: Array.isArray(imageUrls) ? imageUrls.length : (imageUrls ? 1 : 0)
-      })
-      const images = await requestProviderImages(finalPrompt, imageUrls, imageCount, requestContext, onImageGenerated)
-      logger.info('requestProviderImages 返回', {
-        userId,
-        imagesCount: images.length,
-        generatedImagesCount: generatedImages.length,
-        creditDeducted
-      })
-
-      // 立即检查超时
-      if (checkTimeout && checkTimeout()) throw new Error('命令执行超时')
-
-      if (images.length === 0) {
-        return '图像处理失败：未能生成图片'
-      }
-
-      // 如果流式处理中积分未扣除（理论上不应该发生），在这里扣除
-      if (!creditDeducted) {
-        // 使用异步发送，因为此时图片已经发送完成
-        await recordUserUsage(session, styleName, images.length, false)
-        logger.warn('流式处理：积分在最后扣除（异常情况）', { userId, imagesCount: images.length })
-      }
-
-      await session.send('图像处理完成！')
+      const result = await executeImageGenerationCore(session, styleName, finalPrompt, imageCount, imageUrls, requestContext, displayInfo, checkTimeout, true)
+      if (result) return result
 
     } finally {
       userManager.endTask(userId)
@@ -1289,73 +1154,113 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
+  async function executeVideoGenerationCommand(
+    session: Session,
+    img: any,
+    configOptions: {
+      commandName: string
+      startMessage: string
+      basePrompt?: string
+      duration: number
+      aspectRatio: string
+      askPromptIfEmpty: boolean
+    }
+  ): Promise<string> {
+    if (!session?.userId) return '会话无效'
+    if (!videoProvider) return '视频生成功能未启用'
+
+    const userId = session.userId
+    const userName = session.username || userId || '未知用户'
+    const videoCredits = config.videoCreditsMultiplier
+
+    const limitCheck = await userManager.checkAndReserveQuota(
+      userId,
+      userName,
+      videoCredits,
+      config,
+      session.platform
+    )
+    if (!limitCheck.allowed) {
+      return limitCheck.message
+    }
+
+    if (!userManager.startVideoTask(userId)) {
+      return '您有一个视频任务正在进行中，请等待完成'
+    }
+
+    const inputResult = await getInputData(session, img, 'single')
+    if ('error' in inputResult) {
+      userManager.endVideoTask(userId)
+      return inputResult.error
+    }
+
+    const { images: imageUrls, text: extraText } = inputResult
+    if (imageUrls.length === 0) {
+      userManager.endVideoTask(userId)
+      return '未检测到输入图片，请发送一张图片'
+    }
+
+    let finalPrompt = (configOptions.basePrompt || '').trim()
+    if (extraText) {
+      finalPrompt = finalPrompt ? `${finalPrompt} - ${extraText}` : extraText
+    }
+
+    if (!finalPrompt && configOptions.askPromptIfEmpty) {
+      await session.send('请输入视频描述（描述视频中的动作和场景变化）\n提示：描述越详细，生成效果越好')
+      const promptMsg = await session.prompt(30000)
+      if (!promptMsg) {
+        userManager.endVideoTask(userId)
+        return '等待超时'
+      }
+
+      const { images, text } = parseMessageImagesAndText(promptMsg)
+      if (images.length > 0) {
+        userManager.endVideoTask(userId)
+        return '检测到图片，本功能仅支持文字输入'
+      }
+      if (!text) {
+        userManager.endVideoTask(userId)
+        return '未检测到描述'
+      }
+      finalPrompt = text
+    }
+
+    if (!finalPrompt) {
+      userManager.endVideoTask(userId)
+      return '未检测到描述'
+    }
+
+    return runVideoGenerationFlow({
+      session,
+      userId,
+      userManager,
+      videoProvider,
+      logger,
+      sanitizeString,
+      sanitizeError,
+      recordUserUsage,
+      commandName: configOptions.commandName,
+      prompt: finalPrompt,
+      imageUrl: imageUrls[0],
+      videoCredits,
+      maxWaitTime: config.videoMaxWaitTime,
+      startMessage: configOptions.startMessage,
+      videoOptions: {
+        duration: configOptions.duration,
+        aspectRatio: configOptions.aspectRatio
+      }
+    })
+  }
+
   // 图生视频命令（基础）
   if (config.enableVideoGeneration && videoProvider) {
     ctx.command('图生视频 [img:text]', '根据图片和描述生成视频')
       .option('duration', '-d <duration:number> 视频时长（15 或 25 秒）')
       .option('ratio', '-r <ratio:string> 宽高比（16:9, 9:16, 1:1）')
       .action(async ({ session, options }, img) => {
-        if (!session?.userId) return '会话无效'
-
-        const userId = session.userId
-        const userName = session.username || userId || '未知用户'
-
-        // 计算积分消耗
-        const videoCredits = config.videoCreditsMultiplier
-
-        // 检查并预留额度
-        const limitCheck = await userManager.checkAndReserveQuota(
-          userId,
-          userName,
-          videoCredits,
-          config,
-          session.platform
-        )
-        if (!limitCheck.allowed) {
-          return limitCheck.message
-        }
-
-        // 检查视频任务锁（独立于图像任务，不影响图像生成）
-        if (!userManager.startVideoTask(userId)) {
-          return '您有一个视频任务正在进行中，请等待完成'
-        }
-
-        // 获取输入图片
-        const inputResult = await getInputData(session, img, 'single')
-        if ('error' in inputResult) {
-          userManager.endVideoTask(userId)
-          return inputResult.error
-        }
-
-        const { images: imageUrls, text: extraText } = inputResult
-
-        if (imageUrls.length === 0) {
-          userManager.endVideoTask(userId)
-          return '未检测到输入图片，请发送一张图片'
-        }
-
-        // 获取描述
-        let prompt = extraText || ''
-        if (!prompt) {
-          await session.send('请输入视频描述（描述视频中的动作和场景变化）\n提示：描述越详细，生成效果越好')
-          const promptMsg = await session.prompt(30000)
-          if (!promptMsg) {
-            userManager.endVideoTask(userId)
-            return '等待超时'
-          }
-          const elements = h.parse(promptMsg)
-          const text = h.select(elements, 'text').map(e => e.attrs.content).join(' ').trim()
-          if (!text) {
-            userManager.endVideoTask(userId)
-            return '未检测到描述'
-          }
-          prompt = text
-        }
-
         // 验证时长参数（API 只支持 15 或 25 秒）
         const duration = options?.duration || 15
         if (duration !== 15 && duration !== 25) {
-          userManager.endVideoTask(userId)
           return '视频时长必须是 15 或 25 秒'
         }
 
@@ -1363,29 +1268,15 @@ export function apply(ctx: Context, config: Config) {
         const ratio = options?.ratio || '16:9'
         const validRatios = ['16:9', '9:16', '1:1']
         if (!validRatios.includes(ratio)) {
-          userManager.endVideoTask(userId)
           return `宽高比必须是以下之一: ${validRatios.join(', ')}`
         }
 
-        return runVideoGenerationFlow({
-          session,
-          userId,
-          userManager,
-          videoProvider,
-          logger,
-          sanitizeString,
-          sanitizeError,
-          recordUserUsage,
+        return executeVideoGenerationCommand(session, img, {
           commandName: '图生视频',
-          prompt,
-          imageUrl: imageUrls[0],
-          videoCredits,
-          maxWaitTime: config.videoMaxWaitTime,
           startMessage: '开始生成视频...',
-          videoOptions: {
-            duration,
-            aspectRatio: ratio
-          }
+          duration,
+          aspectRatio: ratio,
+          askPromptIfEmpty: true
         })
       })
   }
@@ -1515,70 +1406,13 @@ export function apply(ctx: Context, config: Config) {
 
       ctx.command(`${style.commandName} [img:text]`, '视频风格转换')
         .action(async ({ session }, img) => {
-          if (!session?.userId) return '会话无效'
-
-          const userId = session.userId
-          const userName = session.username || userId || '未知用户'
-
-          // 计算积分消耗
-          const videoCredits = config.videoCreditsMultiplier
-
-          // 检查并预留额度
-          const limitCheck = await userManager.checkAndReserveQuota(
-            userId,
-            userName,
-            videoCredits,
-            config,
-            session.platform
-          )
-          if (!limitCheck.allowed) {
-            return limitCheck.message
-          }
-
-          // 检查视频任务锁（独立于图像任务，不影响图像生成）
-          if (!userManager.startVideoTask(userId)) {
-            return '您有一个视频任务正在进行中，请等待完成'
-          }
-
-          // 获取输入图片
-          const inputResult = await getInputData(session, img, 'single')
-          if ('error' in inputResult) {
-            userManager.endVideoTask(userId)
-            return inputResult.error
-          }
-
-          const { images: imageUrls, text: extraText } = inputResult
-
-          if (imageUrls.length === 0) {
-            userManager.endVideoTask(userId)
-            return '未检测到输入图片，请发送一张图片'
-          }
-
-          // 构建最终 prompt（预设 + 用户追加）
-          let finalPrompt = style.prompt
-          if (extraText) {
-            finalPrompt += ' - ' + extraText
-          }
-
-          return runVideoGenerationFlow({
-            session,
-            userId,
-            userManager,
-            videoProvider,
-            logger,
-            sanitizeString,
-            sanitizeError,
-            recordUserUsage,
+          return executeVideoGenerationCommand(session, img, {
             commandName: style.commandName,
-            prompt: finalPrompt,
-            imageUrl: imageUrls[0],
-            videoCredits,
-            maxWaitTime: config.videoMaxWaitTime,
             startMessage: `开始生成视频（${style.commandName}）...`,
-            videoOptions: {
-              duration: style.duration || 15,
-              aspectRatio: style.aspectRatio || '16:9'
-            }
+            basePrompt: style.prompt,
+            duration: style.duration || 15,
+            aspectRatio: style.aspectRatio || '16:9',
+            askPromptIfEmpty: false
           })
         })
 
