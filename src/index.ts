@@ -1,11 +1,11 @@
 import { Context, Schema, h, Session, Argv } from 'koishi'
 import { createImageProvider, ProviderType } from './providers'
+import { createVideoProvider, VideoProviderType, VideoProvider } from './providers/video-index'
 import { sanitizeError, sanitizeString } from './providers/utils'
 import { UserManager, RechargeRecord } from './services/UserManager'
 import { parseStyleCommandModifiers, buildModelMappingIndex } from './utils/parser'
 import { collectImagesFromParamAndQuote, parseMessageImagesAndText } from './utils/input'
 import { join } from 'path'
-import { YunwuVideoProvider } from './providers/yunwu-video'
 import { runVideoGenerationFlow } from './orchestrators/VideoOrchestrator'
 
 export const name = 'aka-ai-generator'
@@ -24,15 +24,19 @@ const COMMANDS = {
   RECHARGE_ALL: '活动充值',
   RECHARGE_HISTORY: '图像充值记录',
   IMAGE_COMMANDS: '图像指令',
-  VIDEO_COMMANDS: '视频指令'
+  VIDEO_COMMANDS: '视频指令',
+  SINGLE_IMG_VIDEO: '单图生视频',
+  MULTI_IMG_VIDEO: '多图生视频'
 } as const
 
 export type ImageProvider = 'yunwu' | 'gptgod' | 'gemini'
+export type ApiFormat = 'gemini' | 'openai'
 
 export interface ModelMappingConfig {
   suffix: string
   modelId: string
   provider?: ImageProvider
+  apiFormat?: ApiFormat
 }
 
 export interface StyleConfig {
@@ -60,6 +64,9 @@ interface ImageRequestContext {
   numImages?: number
   provider?: ProviderType
   modelId?: string
+  apiFormat?: ApiFormat
+  resolution?: '1k' | '2k' | '4k'
+  aspectRatio?: '1:1' | '4:3' | '16:9' | '9:16' | '3:2' | '2:3'
 }
 
 // 插件配置接口
@@ -67,6 +74,7 @@ export interface Config {
   provider: ImageProvider
   yunwuApiKey: string
   yunwuModelId: string
+  yunwuApiFormat?: ApiFormat
   gptgodApiKey: string
   gptgodModelId: string
   geminiApiKey: string
@@ -89,10 +97,13 @@ export interface Config {
   securityBlockWarningThreshold: number
   // 视频生成配置（独立于图像生成配置）
   enableVideoGeneration: boolean
-  videoProvider: 'yunwu'  // 视频生成供应商（目前只支持 yunwu）
-  videoApiKey: string     // 视频生成 API 密钥
-  videoApiBase: string     // 视频生成 API 地址
-  videoModelId: string     // 视频生成模型ID
+  videoProvider: 'yunwu' | 'gptgod'  // 视频生成供应商
+  videoApiFormat: 'sora' | 'veo' | 'kling' | 'seedance'  // 视频生成模型格式
+  videoApiKey: string     // 视频生成 API 密钥（云雾）
+  videoApiBase: string     // 视频生成 API 地址（云雾）
+  videoModelId: string     // 视频生成模型ID（云雾）
+  gptgodVideoApiKey: string  // GPTGod 视频生成 API 密钥
+  gptgodVideoModelId: string  // GPTGod 视频生成模型ID（可选）
   videoMaxWaitTime: number
   videoCreditsMultiplier: number
   videoStyles: VideoStyleConfig[]
@@ -146,6 +157,10 @@ export const Config: Schema<Config> = Schema.intersect([
     Schema.object({
       yunwuApiKey: Schema.string().role('secret').required().description('云雾 API 密钥'),
       yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
+      yunwuApiFormat: Schema.union([
+        Schema.const('gemini').description('Gemini 原生'),
+        Schema.const('openai').description('GPT Image'),
+      ]).default('gemini').description('接口格式'),
       // 其他 provider 的隐藏默认值
       gptgodApiKey: Schema.string().role('secret').default('').hidden(),
       gptgodModelId: Schema.string().default('nano-banana').hidden(),
@@ -193,15 +208,35 @@ export const Config: Schema<Config> = Schema.intersect([
 
   // ===== 5. 模型映射 =====
   Schema.object({
-    modelMappings: Schema.array(Schema.object({
-      suffix: Schema.string().required().description('切换模型参数名'),
-      provider: Schema.union([
-        Schema.const('yunwu').description('云雾 Gemini 服务'),
-        Schema.const('gptgod').description('GPTGod 服务'),
-        Schema.const('gemini').description('Google Gemini 原生'),
-      ] as const).description('覆盖供应商'),
-      modelId: Schema.string().required().description('模型ID')
-    })).role('table').default([]).description('根据 -后缀切换模型/供应商'),
+    modelMappings: Schema.array(Schema.intersect([
+      Schema.object({
+        suffix: Schema.string().required().description('切换模型参数名'),
+        provider: Schema.union([
+          Schema.const('yunwu').description('云雾 Gemini 服务'),
+          Schema.const('gptgod').description('GPTGod 服务'),
+          Schema.const('gemini').description('Google Gemini 原生'),
+        ] as const).description('覆盖供应商'),
+        modelId: Schema.string().required().description('模型ID')
+      }),
+      // 条件显示 apiFormat（仅当 provider 为 yunwu 时显示）
+      Schema.union([
+        Schema.object({
+          provider: Schema.const('yunwu').required(),
+          apiFormat: Schema.union([
+            Schema.const('gemini').description('Gemini 原生'),
+            Schema.const('openai').description('GPT Image'),
+          ]).default('gemini').description('接口格式')
+        }),
+        Schema.object({
+          provider: Schema.const('gptgod').required(),
+          apiFormat: Schema.string().default('').hidden()
+        }),
+        Schema.object({
+          provider: Schema.const('gemini').required(),
+          apiFormat: Schema.string().default('').hidden()
+        })
+      ])
+    ])).role('table').default([]).description('根据 -后缀切换模型/供应商'),
   }).description('🔀 模型映射'),
 
   // ===== 6. 限流与配额 =====
@@ -265,19 +300,36 @@ export const Config: Schema<Config> = Schema.intersect([
       enableVideoGeneration: Schema.const(true).required(),
       videoProvider: Schema.union([
         Schema.const('yunwu').description('云雾服务'),
+        Schema.const('gptgod').description('GPTGod 服务'),
       ] as const)
         .default('yunwu' as const)
-        .description('视频生成供应商（目前只支持云雾）'),
+        .description('视频生成供应商'),
+      videoApiFormat: Schema.union([
+        Schema.const('sora').description('Sora'),
+        Schema.const('veo').description('Veo'),
+        Schema.const('kling').description('可灵 Kling'),
+        Schema.const('seedance').description('Seedance（豆包）'),
+      ]).default('sora').description('视频生成模型'),
+      // 云雾配置
       videoApiKey: Schema.string()
         .role('secret')
         .default('')
-        .description('视频生成 API 密钥（独立于图像生成配置）'),
+        .description('视频生成 API 密钥（云雾，独立于图像生成配置）'),
       videoApiBase: Schema.string()
         .default('https://yunwu.ai')
-        .description('视频生成 API 地址'),
+        .description('视频生成 API 地址（云雾）'),
       videoModelId: Schema.string()
         .default('sora-2')
-        .description('视频生成模型ID (sora-2 或 sora-2-pro)'),
+        .description('视频生成模型ID（云雾）'),
+      // GPTGod 配置
+      gptgodVideoApiKey: Schema.string()
+        .role('secret')
+        .default('')
+        .description('视频生成 API 密钥（GPTGod）'),
+      gptgodVideoModelId: Schema.string()
+        .default('')
+        .description('视频生成模型ID（GPTGod，可选）'),
+      // 通用配置
       videoMaxWaitTime: Schema.number()
         .default(300)
         .min(60)
@@ -291,7 +343,7 @@ export const Config: Schema<Config> = Schema.intersect([
       videoStyles: Schema.array(Schema.object({
         commandName: Schema.string().required().description('命令名称').role('table-cell', { width: 100 }),
         prompt: Schema.string().role('textarea', { rows: 2 }).required().description('视频描述 prompt'),
-        duration: Schema.number().default(15).description('视频时长（秒，仅支持 15 或 25）'),
+        duration: Schema.number().default(15).description('视频时长（秒）'),
         aspectRatio: Schema.string().description('宽高比（如 16:9）')
       })).role('table').default([
         {
@@ -303,10 +355,13 @@ export const Config: Schema<Config> = Schema.intersect([
       ]).description('视频风格预设'),
     }),
     Schema.object({
-      videoProvider: Schema.union([Schema.const('yunwu')] as const).default('yunwu' as const).hidden(),
+      videoProvider: Schema.union([Schema.const('yunwu'), Schema.const('gptgod')] as const).default('yunwu' as const).hidden(),
+      videoApiFormat: Schema.union(['sora', 'veo', 'kling', 'seedance'] as const).default('sora').hidden(),
       videoApiKey: Schema.string().role('secret').default('').hidden(),
       videoApiBase: Schema.string().default('https://yunwu.ai').hidden(),
       videoModelId: Schema.string().default('sora-2').hidden(),
+      gptgodVideoApiKey: Schema.string().role('secret').default('').hidden(),
+      gptgodVideoModelId: Schema.string().default('').hidden(),
       videoMaxWaitTime: Schema.number().default(300).hidden(),
       videoCreditsMultiplier: Schema.number().default(5).hidden(),
       videoStyles: Schema.array(Schema.object({
@@ -324,11 +379,12 @@ export function apply(ctx: Context, config: Config) {
   const userManager = new UserManager(ctx.baseDir, logger)
 
   // 移除 Provider 缓存，改为按需创建，支持热重载
-  function getProviderInstance(providerType: ProviderType, modelId?: string) {
+  function getProviderInstance(providerType: ProviderType, modelId?: string, apiFormat?: ApiFormat) {
     return createImageProvider({
       provider: providerType,
       yunwuApiKey: config.yunwuApiKey,
       yunwuModelId: providerType === 'yunwu' ? (modelId || config.yunwuModelId) : config.yunwuModelId,
+      yunwuApiFormat: apiFormat || config.yunwuApiFormat || 'gemini',
       gptgodApiKey: config.gptgodApiKey,
       gptgodModelId: providerType === 'gptgod' ? (modelId || config.gptgodModelId) : config.gptgodModelId,
       geminiApiKey: config.geminiApiKey,
@@ -346,24 +402,36 @@ export function apply(ctx: Context, config: Config) {
   const STYLE_TRANSFER_PROMPT = '执行风格转换任务。收到两张图像：IMAGE_1是内容，IMAGE_2是风格。保留IMAGE_1的内容和结构，应用IMAGE_2的艺术风格，输出为1024x1024分辨率。内容锁定：严格保留IMAGE_1中的主体身份、姿势、动作、表情、服装款式、构图布局和背景元素，严禁改变IMAGE_1的几何结构和轮廓，不要引入IMAGE_2中的任何物体、人物、动作或形状。风格应用：分析IMAGE_2的视觉风格（艺术流派、色彩调性、笔触纹理、光影氛围、材质质感），将风格特征应用到IMAGE_1的内容上，让IMAGE_1看起来像是用IMAGE_2的画法重新绘制的。尺寸与填充：最终图像必须严格为1024x1024像素的正方形。如果IMAGE_1的原始比例不是正方形，保持IMAGE_1内容完整且不变形地放置在画面中心，对于周围多出的空白区域，根据IMAGE_1的背景内容和上下文逻辑，使用IMAGE_2的风格生成合理、连贯的背景延伸元素进行填充，确保画面完整自然，无明显接缝或黑边。'
 
   // 创建视频 Provider 实例（如果启用）
-  let videoProvider: YunwuVideoProvider | null = null
+  let videoProvider: VideoProvider | null = null
   if (config.enableVideoGeneration) {
     // 验证视频配置
-    if (!config.videoApiKey) {
-      logger.warn('视频生成功能已启用，但未配置视频 API 密钥，视频功能将不可用')
-    } else if (config.videoProvider !== 'yunwu') {
-      logger.warn(`视频生成供应商 ${config.videoProvider} 暂不支持，仅支持 yunwu`)
+    const isYunwu = config.videoProvider === 'yunwu'
+    const isGptgod = config.videoProvider === 'gptgod'
+    
+    if (isYunwu && !config.videoApiKey) {
+      logger.warn('视频生成功能已启用，但未配置云雾视频 API 密钥，视频功能将不可用')
+    } else if (isGptgod && !config.gptgodVideoApiKey) {
+      logger.warn('视频生成功能已启用，但未配置 GPTGod 视频 API 密钥，视频功能将不可用')
     } else {
-      videoProvider = new YunwuVideoProvider({
-        apiKey: config.videoApiKey,
-        modelId: config.videoModelId,
-        apiBase: config.videoApiBase,
-        apiTimeout: config.apiTimeout,
-        logLevel: config.logLevel,
-        logger,
-        ctx
-      })
-      logger.info(`视频生成功能已启用 (供应商: ${config.videoProvider}, 模型: ${config.videoModelId}, API: ${config.videoApiBase})`)
+      try {
+        videoProvider = createVideoProvider({
+          provider: config.videoProvider as VideoProviderType,
+          apiFormat: config.videoApiFormat,
+          yunwuApiKey: config.videoApiKey,
+          yunwuVideoModelId: config.videoModelId,
+          yunwuVideoApiBase: config.videoApiBase,
+          gptgodVideoApiKey: config.gptgodVideoApiKey,
+          gptgodVideoModelId: config.gptgodVideoModelId,
+          apiTimeout: config.apiTimeout,
+          logLevel: config.logLevel,
+          logger,
+          ctx
+        })
+        logger.info(`视频生成功能已启用 (供应商: ${config.videoProvider}, 格式: ${config.videoApiFormat})`)
+      } catch (error) {
+        logger.error('创建视频 Provider 失败', { error: sanitizeError(error) })
+        videoProvider = null
+      }
     }
   }
 
@@ -698,7 +766,14 @@ export function apply(ctx: Context, config: Config) {
   ): Promise<string[]> {
     const providerType = (requestContext?.provider || config.provider) as ProviderType
     const targetModelId = requestContext?.modelId
-    const providerInstance = getProviderInstance(providerType, targetModelId)
+    const targetApiFormat = requestContext?.apiFormat
+    const providerInstance = getProviderInstance(providerType, targetModelId, targetApiFormat)
+
+    // 构建图像生成选项
+    const imageOptions = {
+      resolution: requestContext?.resolution,
+      aspectRatio: requestContext?.aspectRatio
+    }
 
     logger.info('requestProviderImages 调用', {
       providerType,
@@ -706,11 +781,12 @@ export function apply(ctx: Context, config: Config) {
       numImages,
       hasCallback: !!onImageGenerated,
       promptLength: prompt.length,
-      imageUrlsCount: Array.isArray(imageUrls) ? imageUrls.length : (imageUrls ? 1 : 0)
+      imageUrlsCount: Array.isArray(imageUrls) ? imageUrls.length : (imageUrls ? 1 : 0),
+      ...imageOptions
     })
 
     try {
-      const result = await providerInstance.generateImages(prompt, imageUrls, numImages, onImageGenerated)
+      const result = await providerInstance.generateImages(prompt, imageUrls, numImages, imageOptions, onImageGenerated)
       logger.info('requestProviderImages 完成', {
         providerType,
         resultCount: result.length
@@ -1134,6 +1210,15 @@ export function apply(ctx: Context, config: Config) {
             if (modifiers.modelMapping?.modelId) {
               requestContext.modelId = modifiers.modelMapping.modelId
             }
+            if (modifiers.modelMapping?.apiFormat) {
+              requestContext.apiFormat = modifiers.modelMapping.apiFormat
+            }
+            if (modifiers.resolution) {
+              requestContext.resolution = modifiers.resolution
+            }
+            if (modifiers.aspectRatio) {
+              requestContext.aspectRatio = modifiers.aspectRatio
+            }
 
             // 准备显示信息
             const displayInfo: { customAdditions?: string[], modelId?: string, modelDescription?: string } = {}
@@ -1164,6 +1249,7 @@ export function apply(ctx: Context, config: Config) {
       duration: number
       aspectRatio: string
       askPromptIfEmpty: boolean
+      mode: 'single' | 'multiple'
     }
   ): Promise<string> {
     if (!session?.userId) return '会话无效'
@@ -1188,16 +1274,37 @@ export function apply(ctx: Context, config: Config) {
       return '您有一个视频任务正在进行中，请等待完成'
     }
 
-    const inputResult = await getInputData(session, img, 'single')
+    const inputResult = await getInputData(session, img, configOptions.mode)
     if ('error' in inputResult) {
       userManager.endVideoTask(userId)
       return inputResult.error
     }
 
     const { images: imageUrls, text: extraText } = inputResult
-    if (imageUrls.length === 0) {
-      userManager.endVideoTask(userId)
-      return '未检测到输入图片，请发送一张图片'
+    
+    // 根据模式验证图片数量
+    if (configOptions.mode === 'single') {
+      if (imageUrls.length === 0) {
+        userManager.endVideoTask(userId)
+        return '未检测到输入图片，请发送一张图片'
+      }
+      if (imageUrls.length > 1) {
+        userManager.endVideoTask(userId)
+        return '单图生视频只支持1张图片，请使用"多图生视频"命令处理多张图片'
+      }
+    } else {
+      // 多图模式
+      if (imageUrls.length === 0) {
+        userManager.endVideoTask(userId)
+        return '未检测到输入图片，请至少发送一张图片'
+      }
+      if (imageUrls.length > 4) {
+        userManager.endVideoTask(userId)
+        return '最多支持4张图片，请减少图片数量'
+      }
+      if (imageUrls.length >= 2) {
+        await session.send(`已收到 ${imageUrls.length} 张图片，将用于多图视频合成`)
+      }
     }
 
     let finalPrompt = (configOptions.basePrompt || '').trim()
@@ -1241,7 +1348,7 @@ export function apply(ctx: Context, config: Config) {
       recordUserUsage,
       commandName: configOptions.commandName,
       prompt: finalPrompt,
-      imageUrl: imageUrls[0],
+      imageUrls: imageUrls,
       videoCredits,
       maxWaitTime: config.videoMaxWaitTime,
       startMessage: configOptions.startMessage,
@@ -1252,19 +1359,17 @@ export function apply(ctx: Context, config: Config) {
     })
   }
 
-  // 图生视频命令（基础）
+  // 单图生视频命令
   if (config.enableVideoGeneration && videoProvider) {
-    ctx.command('图生视频 [img:text]', '根据图片和描述生成视频')
+    ctx.command('单图生视频 [img:text]', '使用单张图片生成视频')
       .option('duration', '-d <duration:number> 视频时长（15 或 25 秒）')
       .option('ratio', '-r <ratio:string> 宽高比（16:9, 9:16, 1:1）')
       .action(async ({ session, options }, img) => {
-        // 验证时长参数（API 只支持 15 或 25 秒）
         const duration = options?.duration || 15
         if (duration !== 15 && duration !== 25) {
           return '视频时长必须是 15 或 25 秒'
         }
 
-        // 验证宽高比参数
         const ratio = options?.ratio || '16:9'
         const validRatios = ['16:9', '9:16', '1:1']
         if (!validRatios.includes(ratio)) {
@@ -1272,11 +1377,40 @@ export function apply(ctx: Context, config: Config) {
         }
 
         return executeVideoGenerationCommand(session, img, {
-          commandName: '图生视频',
-          startMessage: '开始生成视频...',
+          commandName: '单图生视频',
+          startMessage: '开始生成单图视频...',
           duration,
           aspectRatio: ratio,
-          askPromptIfEmpty: true
+          askPromptIfEmpty: true,
+          mode: 'single'
+        })
+      })
+  }
+
+  // 多图生视频命令
+  if (config.enableVideoGeneration && videoProvider) {
+    ctx.command('多图生视频 [img:text]', '使用多张图片合成视频（人物+场景互动）')
+      .option('duration', '-d <duration:number> 视频时长（15 或 25 秒）')
+      .option('ratio', '-r <ratio:string> 宽高比（16:9, 9:16, 1:1）')
+      .action(async ({ session, options }, img) => {
+        const duration = options?.duration || 15
+        if (duration !== 15 && duration !== 25) {
+          return '视频时长必须是 15 或 25 秒'
+        }
+
+        const ratio = options?.ratio || '16:9'
+        const validRatios = ['16:9', '9:16', '1:1']
+        if (!validRatios.includes(ratio)) {
+          return `宽高比必须是以下之一: ${validRatios.join(', ')}`
+        }
+
+        return executeVideoGenerationCommand(session, img, {
+          commandName: '多图生视频',
+          startMessage: '开始生成多图合成视频...',
+          duration,
+          aspectRatio: ratio,
+          askPromptIfEmpty: true,
+          mode: 'multiple'
         })
       })
   }
@@ -1399,20 +1533,22 @@ export function apply(ctx: Context, config: Config) {
       })
   }
 
-  // 动态注册视频风格命令
+  // 动态注册视频风格命令（默认单图模式）
   if (config.enableVideoGeneration && videoProvider && config.videoStyles?.length > 0) {
     for (const style of config.videoStyles) {
       if (!style.commandName || !style.prompt) continue
 
-      ctx.command(`${style.commandName} [img:text]`, '视频风格转换')
-        .action(async ({ session }, img) => {
+      ctx.command(`${style.commandName} [img:text]`, '视频风格转换（单图）')
+        .option('multi', '-m 使用多图模式')
+        .action(async ({ session, options }, img) => {
           return executeVideoGenerationCommand(session, img, {
             commandName: style.commandName,
             startMessage: `开始生成视频（${style.commandName}）...`,
             basePrompt: style.prompt,
             duration: style.duration || 15,
             aspectRatio: style.aspectRatio || '16:9',
-            askPromptIfEmpty: false
+            askPromptIfEmpty: false,
+            mode: options?.multi ? 'multiple' : 'single'
           })
         })
 
@@ -1448,6 +1584,15 @@ export function apply(ctx: Context, config: Config) {
       }
       if (modifiers.modelMapping?.modelId) {
         requestContext.modelId = modifiers.modelMapping.modelId
+      }
+      if (modifiers.modelMapping?.apiFormat) {
+        requestContext.apiFormat = modifiers.modelMapping.apiFormat
+      }
+      if (modifiers.resolution) {
+        requestContext.resolution = modifiers.resolution
+      }
+      if (modifiers.aspectRatio) {
+        requestContext.aspectRatio = modifiers.aspectRatio
       }
 
       // 准备显示信息
@@ -1490,6 +1635,15 @@ export function apply(ctx: Context, config: Config) {
       }
       if (modifiers.modelMapping?.modelId) {
         requestContext.modelId = modifiers.modelMapping.modelId
+      }
+      if (modifiers.modelMapping?.apiFormat) {
+        requestContext.apiFormat = modifiers.modelMapping.apiFormat
+      }
+      if (modifiers.resolution) {
+        requestContext.resolution = modifiers.resolution
+      }
+      if (modifiers.aspectRatio) {
+        requestContext.aspectRatio = modifiers.aspectRatio
       }
 
       // 准备显示信息
@@ -1535,6 +1689,15 @@ export function apply(ctx: Context, config: Config) {
       }
       if (modifiers.modelMapping?.modelId) {
         requestContext.modelId = modifiers.modelMapping.modelId
+      }
+      if (modifiers.modelMapping?.apiFormat) {
+        requestContext.apiFormat = modifiers.modelMapping.apiFormat
+      }
+      if (modifiers.resolution) {
+        requestContext.resolution = modifiers.resolution
+      }
+      if (modifiers.aspectRatio) {
+        requestContext.aspectRatio = modifiers.aspectRatio
       }
 
       const displayInfo: { customAdditions?: string[], modelId?: string, modelDescription?: string } = {}
@@ -1651,6 +1814,15 @@ export function apply(ctx: Context, config: Config) {
             if (modifiers.modelMapping?.modelId) {
               requestContext.modelId = modifiers.modelMapping.modelId
             }
+            if (modifiers.modelMapping?.apiFormat) {
+              requestContext.apiFormat = modifiers.modelMapping.apiFormat
+            }
+            if (modifiers.resolution) {
+              requestContext.resolution = modifiers.resolution
+            }
+            if (modifiers.aspectRatio) {
+              requestContext.aspectRatio = modifiers.aspectRatio
+            }
 
             logger.info('开始图片合成处理', {
               userId,
@@ -1658,7 +1830,7 @@ export function apply(ctx: Context, config: Config) {
               prompt,
               numImages: imageCount,
               imageCount: collectedImages.length,
-              modelMapping: modifiers.modelMapping ? { provider: modifiers.modelMapping.provider, modelId: modifiers.modelMapping.modelId } : null
+              modelMapping: modifiers.modelMapping ? { provider: modifiers.modelMapping.provider, modelId: modifiers.modelMapping.modelId, apiFormat: modifiers.modelMapping.apiFormat } : null
             })
 
             // 调用图像编辑API（支持多张图片）
@@ -2150,17 +2322,21 @@ export function apply(ctx: Context, config: Config) {
 
       const lines = ['🎥 视频生成指令列表：\n']
 
-      lines.push(`${prefix}图生视频 - 根据图片和描述生成视频`)
+      lines.push(`${prefix}单图生视频 - 使用单张图片生成视频`)
+      lines.push(`${prefix}多图生视频 - 使用多张图片合成视频（人物+场景互动）`)
       lines.push(`${prefix}查询视频 - 根据任务ID查询视频状态`)
 
       if (config.videoStyles?.length > 0) {
+        lines.push('\n📹 视频风格预设：')
         config.videoStyles.forEach(style => {
-          lines.push(`${prefix}${style.commandName} - 视频风格预设`)
+          lines.push(`${prefix}${style.commandName} - ${style.prompt.substring(0, 20)}...`)
         })
       }
 
       lines.push('\n🧩 视频参数说明：')
       lines.push('• -d <duration> - 视频时长（15 或 25 秒）')
+      lines.push('• -r <ratio> - 宽高比（16:9, 9:16, 1:1）')
+      lines.push('• -m - 使用多图模式（仅视频风格预设支持）')
       lines.push('• -r <ratio> - 宽高比（16:9, 9:16, 1:1）')
 
       return lines.join('\n')

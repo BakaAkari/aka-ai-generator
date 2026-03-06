@@ -1,13 +1,16 @@
 import { ImageProvider } from './types'
 import { GptGodProvider } from './gptgod'
 import { GeminiProvider } from './gemini'
+import { OpenAIImagesProvider } from './openai-images'
 
 export type ProviderType = 'yunwu' | 'gptgod' | 'gemini'
+export type ApiFormat = 'gemini' | 'openai'
 
 export interface ProviderFactoryConfig {
   provider: ProviderType
   yunwuApiKey: string
   yunwuModelId: string
+  yunwuApiFormat?: ApiFormat
   gptgodApiKey: string
   gptgodModelId: string
   geminiApiKey: string
@@ -25,11 +28,23 @@ export interface ProviderFactoryConfig {
 export function createImageProvider(config: ProviderFactoryConfig): ImageProvider {
   switch (config.provider) {
     case 'yunwu':
-      // 云雾复用 Gemini Provider，但指定 API Base
+      // 根据 apiFormat 选择对应的 Provider
+      if (config.yunwuApiFormat === 'openai') {
+        return new OpenAIImagesProvider({
+          apiKey: config.yunwuApiKey,
+          modelId: config.yunwuModelId,
+          apiBase: 'https://yunwu.ai',
+          apiTimeout: config.apiTimeout,
+          logLevel: config.logLevel,
+          logger: config.logger,
+          ctx: config.ctx
+        })
+      }
+      // 默认使用 Gemini 格式
       return new GeminiProvider({
         apiKey: config.yunwuApiKey,
         modelId: config.yunwuModelId,
-        apiBase: 'https://yunwu.ai', // 指定云雾 API 地址
+        apiBase: 'https://yunwu.ai',
         apiTimeout: config.apiTimeout,
         logLevel: config.logLevel,
         logger: config.logger,
@@ -65,5 +80,6 @@ export function createImageProvider(config: ProviderFactoryConfig): ImageProvide
 export { ImageProvider } from './types'
 export { GptGodProvider } from './gptgod'
 export { GeminiProvider } from './gemini'
+export { OpenAIImagesProvider } from './openai-images'
 export { VideoProvider, VideoTaskStatus, VideoGenerationOptions } from './types'
 export { YunwuVideoProvider } from './yunwu-video'

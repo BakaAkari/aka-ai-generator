@@ -1,49 +1,61 @@
 import { VideoProvider, VideoTaskStatus, VideoGenerationOptions, ProviderConfig } from './types'
 import { sanitizeError, sanitizeString, downloadImageAsBase64 } from './utils'
 
-export type VideoApiFormat = 'sora' | 'veo' | 'kling' | 'seedance'
+export type GPTGodVideoApiFormat = 'sora' | 'veo' | 'kling'
 
-export interface YunwuVideoConfig extends ProviderConfig {
+export interface GPTGodVideoConfig extends ProviderConfig {
   apiKey: string
-  modelId: string
+  modelId?: string
   apiBase: string
-  apiFormat?: VideoApiFormat
+  apiFormat: GPTGodVideoApiFormat
 }
 
-export class YunwuVideoProvider implements VideoProvider {
-  private config: YunwuVideoConfig
+/**
+ * GPTGod 视频生成 Provider
+ * 支持 Sora、Veo、可灵
+ * 明确不支持：海螺、Seedance
+ */
+export class GPTGodVideoProvider implements VideoProvider {
+  private config: GPTGodVideoConfig
 
-  constructor(config: YunwuVideoConfig) {
+  constructor(config: GPTGodVideoConfig) {
     this.config = config
   }
 
   /**
    * 创建视频生成任务
-   * 根据 apiFormat 路由到不同的实现
    */
   async createVideoTask(
     prompt: string,
     imageUrls: string | string[],
     options?: VideoGenerationOptions
   ): Promise<string> {
-    const format = this.config.apiFormat || 'sora'
+    const { apiFormat } = this.config
     const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls]
     
-    switch (format) {
+    // 明确不支持海螺和 Seedance
+    if (apiFormat === 'hailuo' as any) {
+      throw new Error('GPTGod 不支持海螺视频生成，请选择其他供应商')
+    }
+    if (apiFormat === 'seedance' as any) {
+      throw new Error('GPTGod 不支持 Seedance 视频生成，请使用云雾供应商')
+    }
+
+    switch (apiFormat) {
+      case 'sora':
+        return this.createSoraTask(prompt, urls, options)
       case 'veo':
         return this.createVeoTask(prompt, urls, options)
       case 'kling':
         return this.createKlingTask(prompt, urls, options)
-      case 'seedance':
-        return this.createSeedanceTask(prompt, urls, options)
-      case 'sora':
       default:
-        return this.createSoraTask(prompt, urls, options)
+        throw new Error(`GPTGod 不支持的模型格式: ${apiFormat}`)
     }
   }
 
   /**
-   * Sora 视频生成（原有逻辑）
+   * GPTGod Sora 视频生成
+   * 使用视频统一格式
    */
   private async createSoraTask(
     prompt: string,
@@ -53,18 +65,17 @@ export class YunwuVideoProvider implements VideoProvider {
     const { logger, ctx } = this.config
 
     try {
-      // Sora 标准模式只支持单图，多图使用 components 模式或取第一张
+      // GPTGod Sora 只支持单图
       const primaryImageUrl = imageUrls[0]
       const hasMultipleImages = imageUrls.length > 1
       
       if (hasMultipleImages) {
-        logger?.warn('Sora 标准模式只支持单图，将使用第一张图片', { 
-          totalImages: imageUrls.length,
-          usedImage: primaryImageUrl 
+        logger?.warn('GPTGod Sora 只支持单图，将使用第一张图片', { 
+          totalImages: imageUrls.length 
         })
       }
 
-      // 1. 下载主图片并转换为 Base64
+      // 下载图片
       logger?.info('下载输入图片', { imageUrl: primaryImageUrl, totalImages: imageUrls.length })
       const { data: imageBase64, mimeType } = await downloadImageAsBase64(
         ctx,
@@ -73,169 +84,23 @@ export class YunwuVideoProvider implements VideoProvider {
         logger
       )
 
-      // 2. 将 aspectRatio 转换为 orientation
-      let orientation: 'portrait' | 'landscape' = 'landscape'
-      if (options?.aspectRatio === '9:16') {
-        orientation = 'portrait'
-      } else if (options?.aspectRatio === '1:1') {
-        orientation = 'portrait'
-      }
-
-      // 3. 处理 duration
-      let duration = options?.duration || 15
-      if (duration < 15) {
-        duration = 15
-      } else if (duration > 25) {
-        duration = 25
-      } else if (duration <= 20) {
-        duration = 15
-      } else {
-        duration = 25
-      }
-
-      // 4. 构建请求体
-      // 多图情况下，如果模型支持 components，可以传递多张
-      const images = [`data:${mimeType};base64,${imageBase64}`]
+      const modelId = this.config.modelId || 'sora-2'
       
-      const buildRequestBody = (watermark: boolean) => ({
-        images,
-        model: this.config.modelId,
-        orientation: orientation,
-        prompt: prompt,
-        size: 'large',
-        duration: duration,
-        watermark,
-        private: false,
-        // 多图模式下可以添加参考图片（如果API支持）
-        ...(hasMultipleImages && this.config.modelId?.includes('components') ? {
-          components: imageUrls.slice(1).map((_, idx) => ({
-            type: 'image',
-            index: idx + 1
-          }))
-        } : {})
-      })
-
-      logger?.info('提交 Sora 视频生成任务', { 
-        model: this.config.modelId,
-        promptLength: prompt.length,
-        duration,
-        orientation
-      })
-
-      const doCreate = async (watermark: boolean) => {
-        return await ctx.http.post(
-          `${this.config.apiBase}/v1/video/create`,
-          buildRequestBody(watermark),
-          {
-            headers: {
-              'Authorization': `Bearer ${this.config.apiKey}`,
-              'Content-Type': 'application/json',
-              'Accept': 'application/json'
-            },
-            timeout: this.config.apiTimeout * 1000
-          }
-        )
-      }
-
-      // 5. 调用 API
-      let response: any
-      try {
-        response = await doCreate(false)
-      } catch (e: any) {
-        logger?.warn('无水印创建任务失败，尝试有水印', { error: sanitizeError(e) })
-        response = await doCreate(true)
-      }
-
-      if (response?.error || (response?.status && response.status >= 400)) {
-        logger?.warn('无水印创建任务返回错误，尝试有水印', { status: response?.status, error: response?.error })
-        response = await doCreate(true)
-      }
-
-      if (response.error) {
-        const errorMsg = response.error.message || response.error.type || '创建任务失败'
-        throw new Error(sanitizeString(errorMsg))
-      }
-
-      if (response.status && response.status >= 400) {
-        const errorMsg = response.data?.error?.message || response.data?.error || response.statusText || '创建任务失败'
-        throw new Error(sanitizeString(errorMsg))
-      }
-
-      const taskId = response.id
-      if (!taskId) {
-        logger?.error('未能获取任务ID', { response })
-        throw new Error('未能获取任务ID，请检查 API 响应格式')
-      }
-
-      logger?.info('Sora 视频任务已创建', { taskId, status: response.status })
-      return taskId
-
-    } catch (error: any) {
-      logger?.error('创建 Sora 视频任务失败', { error: sanitizeError(error) })
-      throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
-    }
-  }
-
-  /**
-   * Veo 视频生成
-   */
-  private async createVeoTask(
-    prompt: string,
-    imageUrls: string[],
-    options?: VideoGenerationOptions
-  ): Promise<string> {
-    const { logger, ctx } = this.config
-
-    try {
-      // 下载所有图片（Veo 支持多图）
-      logger?.info('下载输入图片', { imageCount: imageUrls.length, imageUrls })
-      
-      const imageDataList = await Promise.all(
-        imageUrls.map(async (url, idx) => {
-          try {
-            const { data, mimeType } = await downloadImageAsBase64(
-              ctx,
-              url,
-              this.config.apiTimeout,
-              logger
-            )
-            return { data, mimeType, index: idx, success: true }
-          } catch (error) {
-            logger?.error(`下载第 ${idx + 1} 张图片失败`, { url, error: sanitizeError(error) })
-            return { data: '', mimeType: '', index: idx, success: false }
-          }
-        })
-      )
-      
-      // 过滤掉下载失败的图片
-      const validImages = imageDataList.filter(img => img.success)
-      if (validImages.length === 0) {
-        throw new Error('所有图片下载失败')
-      }
-      
-      if (validImages.length < imageUrls.length) {
-        logger?.warn('部分图片下载失败，将使用剩余图片继续', { 
-          total: imageUrls.length, 
-          success: validImages.length 
-        })
-      }
-
       const requestBody: any = {
-        model: this.config.modelId || 'veo3.1-fast',
+        model: modelId,
         prompt: prompt,
-        images: validImages.map(({ data, mimeType }) => `data:${mimeType};base64,${data}`),
-        enhance_prompt: options?.enhancePrompt ?? true,
-        aspect_ratio: options?.aspectRatio || '16:9'
+        aspect_ratio: options?.aspectRatio || '16:9',
+        image: `data:${mimeType};base64,${imageBase64}`
       }
 
-      logger?.info('提交 Veo 视频生成任务', { 
-        model: requestBody.model,
+      logger?.info('提交 GPTGod Sora 视频生成任务', { 
+        model: modelId,
         promptLength: prompt.length,
-        aspectRatio: requestBody.aspect_ratio
+        hasImage: true
       })
 
       const response = await ctx.http.post(
-        `${this.config.apiBase}/v1/video/create`,
+        `${this.config.apiBase}/sora-2/videos`,
         requestBody,
         {
           headers: {
@@ -258,19 +123,20 @@ export class YunwuVideoProvider implements VideoProvider {
         throw new Error('未能获取任务ID')
       }
 
-      logger?.info('Veo 视频任务已创建', { taskId, status: response.status })
+      logger?.info('GPTGod Sora 视频任务已创建', { taskId, status: response.status })
       return taskId
 
     } catch (error: any) {
-      logger?.error('创建 Veo 视频任务失败', { error: sanitizeError(error) })
+      logger?.error('创建 GPTGod Sora 视频任务失败', { error: sanitizeError(error) })
       throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
     }
   }
 
   /**
-   * 可灵 Kling 视频生成（图生视频）
+   * GPTGod Veo 视频生成
+   * 使用视频统一格式
    */
-  private async createKlingTask(
+  private async createVeoTask(
     prompt: string,
     imageUrls: string[],
     options?: VideoGenerationOptions
@@ -278,7 +144,7 @@ export class YunwuVideoProvider implements VideoProvider {
     const { logger, ctx } = this.config
 
     try {
-      // 下载所有图片（可灵支持多图参考）
+      // 下载所有图片
       logger?.info('下载输入图片', { imageCount: imageUrls.length })
       
       const imageDataList = await Promise.all(
@@ -290,10 +156,10 @@ export class YunwuVideoProvider implements VideoProvider {
               this.config.apiTimeout,
               logger
             )
-            return { data, mimeType, index: idx, success: true }
+            return { data, mimeType, success: true }
           } catch (error) {
-            logger?.error(`下载第 ${idx + 1} 张图片失败`, { url, error: sanitizeError(error) })
-            return { data: '', mimeType: '', index: idx, success: false }
+            logger?.error(`下载第 ${idx + 1} 张图片失败`, { error: sanitizeError(error) })
+            return { data: '', mimeType: '', success: false }
           }
         })
       )
@@ -303,7 +169,91 @@ export class YunwuVideoProvider implements VideoProvider {
         throw new Error('所有图片下载失败')
       }
 
-      // 第一张作为主图，其余作为参考图
+      const modelId = this.config.modelId || 'veo3'
+
+      const requestBody: any = {
+        model: modelId,
+        prompt: prompt,
+        aspect_ratio: options?.aspectRatio || '16:9',
+        images: validImages.map(({ data, mimeType }) => `data:${mimeType};base64,${data}`),
+        enhance_prompt: options?.enhancePrompt ?? true
+      }
+
+      logger?.info('提交 GPTGod Veo 视频生成任务', { 
+        model: modelId,
+        promptLength: prompt.length
+      })
+
+      const response = await ctx.http.post(
+        `${this.config.apiBase}/veo/videos`,
+        requestBody,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.config.apiKey}`,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          timeout: this.config.apiTimeout * 1000
+        }
+      )
+
+      if (response.error) {
+        const errorMsg = response.error.message || response.error.type || '创建任务失败'
+        throw new Error(sanitizeString(errorMsg))
+      }
+
+      const taskId = response.id
+      if (!taskId) {
+        logger?.error('未能获取任务ID', { response })
+        throw new Error('未能获取任务ID')
+      }
+
+      logger?.info('GPTGod Veo 视频任务已创建', { taskId, status: response.status })
+      return taskId
+
+    } catch (error: any) {
+      logger?.error('创建 GPTGod Veo 视频任务失败', { error: sanitizeError(error) })
+      throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
+    }
+  }
+
+  /**
+   * GPTGod 可灵视频生成
+   * 使用官方格式
+   */
+  private async createKlingTask(
+    prompt: string,
+    imageUrls: string[],
+    options?: VideoGenerationOptions
+  ): Promise<string> {
+    const { logger, ctx } = this.config
+
+    try {
+      // 下载所有图片
+      logger?.info('下载输入图片', { imageCount: imageUrls.length })
+      
+      const imageDataList = await Promise.all(
+        imageUrls.map(async (url, idx) => {
+          try {
+            const { data, mimeType } = await downloadImageAsBase64(
+              ctx,
+              url,
+              this.config.apiTimeout,
+              logger
+            )
+            return { data, mimeType, success: true }
+          } catch (error) {
+            logger?.error(`下载第 ${idx + 1} 张图片失败`, { error: sanitizeError(error) })
+            return { data: '', mimeType: '', success: false }
+          }
+        })
+      )
+      
+      const validImages = imageDataList.filter(img => img.success)
+      if (validImages.length === 0) {
+        throw new Error('所有图片下载失败')
+      }
+
       const primaryImage = validImages[0]
       const referenceImages = validImages.slice(1)
 
@@ -318,107 +268,6 @@ export class YunwuVideoProvider implements VideoProvider {
         sound: options?.sound || 'off'
       }
 
-      // 添加参考图片（如果有多张）
-      if (referenceImages.length > 0) {
-        requestBody.reference_images = referenceImages.map(img => ({
-          image: `data:${img.mimeType};base64,${img.data}`,
-          type: 'subject'  // 或 'face'，根据需求选择
-        }))
-      }
-
-      if (options?.cameraControl) {
-        requestBody.camera_control = options.cameraControl
-      }
-
-      logger?.info('提交可灵视频生成任务', { 
-        model: requestBody.model_name,
-        promptLength: prompt.length,
-        mode: requestBody.mode,
-        duration: requestBody.duration,
-        referenceImageCount: referenceImages.length
-      })
-
-      const response = await ctx.http.post(
-        `${this.config.apiBase}/kling/v1/videos/image2video`,
-        requestBody,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.config.apiKey}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: this.config.apiTimeout * 1000
-        }
-      )
-
-      // 可灵响应格式：{ code, message, data: { task_id } }
-      if (response.code !== 0 && response.code !== undefined) {
-        const errorMsg = response.message || '创建任务失败'
-        throw new Error(sanitizeString(errorMsg))
-      }
-
-      const taskId = response.data?.task_id || response.task_id
-      if (!taskId) {
-        logger?.error('未能获取任务ID', { response })
-        throw new Error('未能获取任务ID')
-      }
-
-      logger?.info('可灵视频任务已创建', { taskId })
-      return String(taskId)
-
-    } catch (error: any) {
-      logger?.error('创建可灵视频任务失败', { error: sanitizeError(error) })
-      throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
-    }
-  }
-
-  /**
-   * Seedance 视频生成（豆包视频，与可灵接口相同）
-   */
-  private async createSeedanceTask(
-    prompt: string,
-    imageUrls: string[],
-    options?: VideoGenerationOptions
-  ): Promise<string> {
-    const { logger, ctx } = this.config
-
-    try {
-      // Seedance 同可灵接口，支持多图
-      logger?.info('下载输入图片', { imageCount: imageUrls.length })
-      
-      const imageDataList = await Promise.all(
-        imageUrls.map(async (url, idx) => {
-          try {
-            const { data, mimeType } = await downloadImageAsBase64(
-              ctx,
-              url,
-              this.config.apiTimeout,
-              logger
-            )
-            return { data, mimeType, index: idx, success: true }
-          } catch (error) {
-            logger?.error(`下载第 ${idx + 1} 张图片失败`, { url, error: sanitizeError(error) })
-            return { data: '', mimeType: '', index: idx, success: false }
-          }
-        })
-      )
-      
-      const validImages = imageDataList.filter(img => img.success)
-      if (validImages.length === 0) {
-        throw new Error('所有图片下载失败')
-      }
-
-      const primaryImage = validImages[0]
-      const referenceImages = validImages.slice(1)
-
-      const requestBody: any = {
-        model_name: this.config.modelId || 'seedance-v1',
-        prompt: prompt,
-        image: `data:${primaryImage.mimeType};base64,${primaryImage.data}`,
-        mode: options?.mode || 'std',
-        duration: String(options?.duration || 5),
-        aspect_ratio: options?.aspectRatio || '16:9'
-      }
-
       // 添加参考图片
       if (referenceImages.length > 0) {
         requestBody.reference_images = referenceImages.map(img => ({
@@ -427,9 +276,14 @@ export class YunwuVideoProvider implements VideoProvider {
         }))
       }
 
-      logger?.info('提交 Seedance 视频生成任务', { 
+      if (options?.cameraControl) {
+        requestBody.camera_control = options.cameraControl
+      }
+
+      logger?.info('提交 GPTGod 可灵视频生成任务', { 
         model: requestBody.model_name,
         promptLength: prompt.length,
+        mode: requestBody.mode,
         referenceImageCount: referenceImages.length
       })
 
@@ -445,6 +299,7 @@ export class YunwuVideoProvider implements VideoProvider {
         }
       )
 
+      // 可灵响应格式
       if (response.code !== 0 && response.code !== undefined) {
         const errorMsg = response.message || '创建任务失败'
         throw new Error(sanitizeString(errorMsg))
@@ -456,31 +311,30 @@ export class YunwuVideoProvider implements VideoProvider {
         throw new Error('未能获取任务ID')
       }
 
-      logger?.info('Seedance 视频任务已创建', { taskId })
+      logger?.info('GPTGod 可灵视频任务已创建', { taskId })
       return String(taskId)
 
     } catch (error: any) {
-      logger?.error('创建 Seedance 视频任务失败', { error: sanitizeError(error) })
+      logger?.error('创建 GPTGod 可灵视频任务失败', { error: sanitizeError(error) })
       throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
     }
   }
 
   /**
    * 查询任务状态
-   * 根据 apiFormat 路由到不同的查询实现
    */
   async queryTaskStatus(taskId: string): Promise<VideoTaskStatus> {
-    const format = this.config.apiFormat || 'sora'
+    const { apiFormat } = this.config
     
-    switch (format) {
+    switch (apiFormat) {
+      case 'sora':
+        return this.querySoraTaskStatus(taskId)
       case 'veo':
         return this.queryVeoTaskStatus(taskId)
       case 'kling':
-      case 'seedance':
         return this.queryKlingTaskStatus(taskId)
-      case 'sora':
       default:
-        return this.querySoraTaskStatus(taskId)
+        throw new Error(`GPTGod 不支持的模型格式: ${apiFormat}`)
     }
   }
 
@@ -492,7 +346,7 @@ export class YunwuVideoProvider implements VideoProvider {
 
     try {
       const response = await ctx.http.get(
-        `${this.config.apiBase}/v1/video/query?id=${encodeURIComponent(taskId)}`,
+        `${this.config.apiBase}/sora/videos/${encodeURIComponent(taskId)}`,
         {
           headers: {
             'Authorization': `Bearer ${this.config.apiKey}`,
@@ -514,7 +368,7 @@ export class YunwuVideoProvider implements VideoProvider {
       }
 
     } catch (error: any) {
-      logger?.error('查询 Sora 任务状态失败', { taskId, error: sanitizeError(error) })
+      logger?.error('查询 GPTGod Sora 任务状态失败', { taskId, error: sanitizeError(error) })
       throw new Error(`查询任务失败: ${sanitizeString(error.message || '未知错误')}`)
     }
   }
@@ -527,7 +381,7 @@ export class YunwuVideoProvider implements VideoProvider {
 
     try {
       const response = await ctx.http.get(
-        `${this.config.apiBase}/v1/video/query?id=${encodeURIComponent(taskId)}`,
+        `${this.config.apiBase}/veo/videos/${encodeURIComponent(taskId)}`,
         {
           headers: {
             'Authorization': `Bearer ${this.config.apiKey}`,
@@ -549,13 +403,13 @@ export class YunwuVideoProvider implements VideoProvider {
       }
 
     } catch (error: any) {
-      logger?.error('查询 Veo 任务状态失败', { taskId, error: sanitizeError(error) })
+      logger?.error('查询 GPTGod Veo 任务状态失败', { taskId, error: sanitizeError(error) })
       throw new Error(`查询任务失败: ${sanitizeString(error.message || '未知错误')}`)
     }
   }
 
   /**
-   * 查询可灵/Seedance 任务状态
+   * 查询可灵任务状态
    */
   private async queryKlingTaskStatus(taskId: string): Promise<VideoTaskStatus> {
     const { logger, ctx } = this.config
@@ -572,11 +426,9 @@ export class YunwuVideoProvider implements VideoProvider {
         }
       )
 
-      // 可灵响应格式：{ code, data: { task_status, video_url } }
       const rawStatus = response.data?.task_status || response.task_status || 'pending'
       const videoUrl = response.data?.video_url || response.video_url || null
 
-      // 映射状态
       const statusMap: Record<string, VideoTaskStatus['status']> = {
         'submitted': 'pending',
         'processing': 'processing',
@@ -593,7 +445,7 @@ export class YunwuVideoProvider implements VideoProvider {
       }
 
     } catch (error: any) {
-      logger?.error('查询可灵任务状态失败', { taskId, error: sanitizeError(error) })
+      logger?.error('查询 GPTGod 可灵任务状态失败', { taskId, error: sanitizeError(error) })
       throw new Error(`查询任务失败: ${sanitizeString(error.message || '未知错误')}`)
     }
   }
@@ -684,11 +536,11 @@ export class YunwuVideoProvider implements VideoProvider {
     const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls]
 
     try {
-      logger?.info('开始生成视频', { 
+      logger?.info('开始生成视频（GPTGod）', { 
         prompt, 
         imageCount: urls.length,
         options,
-        apiFormat: this.config.apiFormat || 'sora'
+        apiFormat: this.config.apiFormat
       })
 
       // 1. 创建任务
@@ -701,11 +553,11 @@ export class YunwuVideoProvider implements VideoProvider {
       // 3. 轮询等待完成
       const videoUrl = await this.waitForVideo(taskId, maxWaitTime)
 
-      logger?.info('视频生成完成', { taskId, videoUrl })
+      logger?.info('视频生成完成（GPTGod）', { taskId, videoUrl })
       return videoUrl
 
     } catch (error: any) {
-      logger?.error('视频生成失败', { error: sanitizeError(error) })
+      logger?.error('视频生成失败（GPTGod）', { error: sanitizeError(error) })
       throw error
     }
   }

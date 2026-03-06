@@ -4,6 +4,8 @@ import { ModelMappingConfig } from '../index'
 interface StyleCommandModifiers {
   modelMapping?: ModelMappingConfig
   customAdditions?: string[]
+  resolution?: '1k' | '2k' | '4k'
+  aspectRatio?: '1:1' | '4:3' | '16:9' | '9:16' | '3:2' | '2:3'
 }
 
 /**
@@ -104,14 +106,32 @@ export function parseStyleCommandModifiers(
     index++
   }
 
+  // 解析已知的图像参数
+  const validResolutions = ['1k', '2k', '4k']
+  const validAspectRatios = ['1:1', '4:3', '16:9', '9:16', '3:2', '2:3']
+  
   for (const arg of flagCandidates) {
     if (!arg.startsWith('-')) continue
     const key = normalizeSuffix(arg)
     if (!key) continue
+    
+    // 检查是否是分辨率参数 (-1k, -2k, -4k)
+    if (validResolutions.includes(key)) {
+      modifiers.resolution = key as '1k' | '2k' | '4k'
+      continue
+    }
+    
+    // 检查是否是宽高比参数 (-1:1, -4:3, -16:9, -9:16, -3:2, -2:3)
+    if (validAspectRatios.includes(key)) {
+      modifiers.aspectRatio = key as '1:1' | '4:3' | '16:9' | '9:16' | '3:2' | '2:3'
+      continue
+    }
+    
+    // 检查是否是模型映射
     const mapping = modelMappingIndex.get(key)
     if (mapping) {
       modifiers.modelMapping = mapping
-      break
+      // 不break，继续解析其他参数
     }
   }
 

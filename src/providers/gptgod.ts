@@ -1,4 +1,4 @@
-import { ImageProvider, ProviderConfig } from './types'
+import { ImageProvider, ProviderConfig, ImageGenerationOptions } from './types'
 import { sanitizeError, sanitizeString, downloadImageAsBase64 } from './utils'
 
 const GPTGOD_DEFAULT_API_URL = 'https://api.gptgod.online/v1/chat/completions'
@@ -243,6 +243,7 @@ export class GptGodProvider implements ImageProvider {
     prompt: string, 
     imageUrls: string | string[], 
     numImages: number,
+    options?: ImageGenerationOptions,
     onImageGenerated?: (imageUrl: string, index: number, total: number) => void | Promise<void>
   ): Promise<string[]> {
     const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls]
@@ -254,8 +255,17 @@ export class GptGodProvider implements ImageProvider {
     }
 
     if (this.config.logLevel === 'debug') {
-      logger.debug('调用 GPTGod 图像编辑 API', { prompt, imageCount: urls.length, numImages })
+      logger.debug('调用 GPTGod 图像编辑 API', { 
+        prompt, 
+        imageCount: urls.length, 
+        numImages,
+        resolution: options?.resolution,
+        aspectRatio: options?.aspectRatio
+      })
     }
+    
+    // 注：GPTGod 使用 Chat Completions 接口，size 和 aspectRatio 参数由模型自动处理
+    // 如需强制指定尺寸，可在 prompt 中追加说明
 
     // 预先构建图片内容部分（所有循环共用）
     const imageParts: any[] = []
