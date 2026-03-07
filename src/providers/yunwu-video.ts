@@ -1,13 +1,11 @@
 import { VideoProvider, VideoTaskStatus, VideoGenerationOptions, ProviderConfig } from './types'
 import { sanitizeError, sanitizeString, downloadImageAsBase64 } from './utils'
 
-export type VideoApiFormat = 'sora' | 'veo' | 'kling' | 'seedance'
-
 export interface YunwuVideoConfig extends ProviderConfig {
   apiKey: string
   modelId: string
   apiBase: string
-  apiFormat?: VideoApiFormat
+  multiImageModelId?: string  // 多图生成视频专用模型ID
 }
 
 export class YunwuVideoProvider implements VideoProvider {
@@ -19,53 +17,44 @@ export class YunwuVideoProvider implements VideoProvider {
 
   /**
    * 创建视频生成任务
-   * 根据 apiFormat 路由到不同的实现
+   * 根据图片数量选择单图或多图模型
    */
   async createVideoTask(
     prompt: string,
     imageUrls: string | string[],
     options?: VideoGenerationOptions
   ): Promise<string> {
-    const format = this.config.apiFormat || 'sora'
     const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls]
+    const hasMultipleImages = urls.length > 1
     
-    switch (format) {
-      case 'veo':
-        return this.createVeoTask(prompt, urls, options)
-      case 'kling':
-        return this.createKlingTask(prompt, urls, options)
-      case 'seedance':
-        return this.createSeedanceTask(prompt, urls, options)
-      case 'sora':
-      default:
-        return this.createSoraTask(prompt, urls, options)
+    // 如果有多张图片且配置了多图模型ID，使用多图模式
+    if (hasMultipleImages && this.config.multiImageModelId) {
+      return this.createMultiImageTask(prompt, urls, options)
     }
+    
+    // 单图模式使用单图模型
+    return this.createSingleImageTask(prompt, urls, options)
   }
 
   /**
-   * Sora 视频生成（原有逻辑）
+   * 单图视频生成（通用实现）
    */
-  private async createSoraTask(
+  private async createSingleImageTask(
     prompt: string,
     imageUrls: string[],
     options?: VideoGenerationOptions
   ): Promise<string> {
-    const { logger, ctx } = this.config
+    const { logger, ctx, modelId } = this.config
+
+    if (!modelId) {
+      throw new Error('未配置单图生成视频模型ID')
+    }
 
     try {
-      // Sora 标准模式只支持单图，多图使用 components 模式或取第一张
       const primaryImageUrl = imageUrls[0]
-      const hasMultipleImages = imageUrls.length > 1
       
-      if (hasMultipleImages) {
-        logger?.warn('Sora 标准模式只支持单图，将使用第一张图片', { 
-          totalImages: imageUrls.length,
-          usedImage: primaryImageUrl 
-        })
-      }
-
-      // 1. 下载主图片并转换为 Base64
-      logger?.info('下载输入图片', { imageUrl: primaryImageUrl, totalImages: imageUrls.length })
+      // 1. 下载图片并转换为 Base64
+      logger?.info('【单图模式】下载输入图片', { imageUrl: primaryImageUrl })
       const { data: imageBase64, mimeType } = await downloadImageAsBase64(
         ctx,
         primaryImageUrl,
@@ -73,163 +62,21 @@ export class YunwuVideoProvider implements VideoProvider {
         logger
       )
 
-      // 2. 将 aspectRatio 转换为 orientation
-      let orientation: 'portrait' | 'landscape' = 'landscape'
-      if (options?.aspectRatio === '9:16') {
-        orientation = 'portrait'
-      } else if (options?.aspectRatio === '1:1') {
-        orientation = 'portrait'
-      }
-
-      // 3. 处理 duration
-      let duration = options?.duration || 15
-      if (duration < 15) {
-        duration = 15
-      } else if (duration > 25) {
-        duration = 25
-      } else if (duration <= 20) {
-        duration = 15
-      } else {
-        duration = 25
-      }
-
-      // 4. 构建请求体
-      // 多图情况下，如果模型支持 components，可以传递多张
-      const images = [`data:${mimeType};base64,${imageBase64}`]
-      
-      const buildRequestBody = (watermark: boolean) => ({
-        images,
-        model: this.config.modelId,
-        orientation: orientation,
-        prompt: prompt,
-        size: 'large',
-        duration: duration,
-        watermark,
-        private: false,
-        // 多图模式下可以添加参考图片（如果API支持）
-        ...(hasMultipleImages && this.config.modelId?.includes('components') ? {
-          components: imageUrls.slice(1).map((_, idx) => ({
-            type: 'image',
-            index: idx + 1
-          }))
-        } : {})
-      })
-
-      logger?.info('提交 Sora 视频生成任务', { 
-        model: this.config.modelId,
-        promptLength: prompt.length,
-        duration,
-        orientation
-      })
-
-      const doCreate = async (watermark: boolean) => {
-        return await ctx.http.post(
-          `${this.config.apiBase}/v1/video/create`,
-          buildRequestBody(watermark),
-          {
-            headers: {
-              'Authorization': `Bearer ${this.config.apiKey}`,
-              'Content-Type': 'application/json',
-              'Accept': 'application/json'
-            },
-            timeout: this.config.apiTimeout * 1000
-          }
-        )
-      }
-
-      // 5. 调用 API
-      let response: any
-      try {
-        response = await doCreate(false)
-      } catch (e: any) {
-        logger?.warn('无水印创建任务失败，尝试有水印', { error: sanitizeError(e) })
-        response = await doCreate(true)
-      }
-
-      if (response?.error || (response?.status && response.status >= 400)) {
-        logger?.warn('无水印创建任务返回错误，尝试有水印', { status: response?.status, error: response?.error })
-        response = await doCreate(true)
-      }
-
-      if (response.error) {
-        const errorMsg = response.error.message || response.error.type || '创建任务失败'
-        throw new Error(sanitizeString(errorMsg))
-      }
-
-      if (response.status && response.status >= 400) {
-        const errorMsg = response.data?.error?.message || response.data?.error || response.statusText || '创建任务失败'
-        throw new Error(sanitizeString(errorMsg))
-      }
-
-      const taskId = response.id
-      if (!taskId) {
-        logger?.error('未能获取任务ID', { response })
-        throw new Error('未能获取任务ID，请检查 API 响应格式')
-      }
-
-      logger?.info('Sora 视频任务已创建', { taskId, status: response.status })
-      return taskId
-
-    } catch (error: any) {
-      logger?.error('创建 Sora 视频任务失败', { error: sanitizeError(error) })
-      throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
-    }
-  }
-
-  /**
-   * Veo 视频生成
-   */
-  private async createVeoTask(
-    prompt: string,
-    imageUrls: string[],
-    options?: VideoGenerationOptions
-  ): Promise<string> {
-    const { logger, ctx } = this.config
-
-    try {
-      // 下载所有图片（Veo 支持多图）
-      logger?.info('下载输入图片', { imageCount: imageUrls.length, imageUrls })
-      
-      const imageDataList = await Promise.all(
-        imageUrls.map(async (url, idx) => {
-          try {
-            const { data, mimeType } = await downloadImageAsBase64(
-              ctx,
-              url,
-              this.config.apiTimeout,
-              logger
-            )
-            return { data, mimeType, index: idx, success: true }
-          } catch (error) {
-            logger?.error(`下载第 ${idx + 1} 张图片失败`, { url, error: sanitizeError(error) })
-            return { data: '', mimeType: '', index: idx, success: false }
-          }
-        })
-      )
-      
-      // 过滤掉下载失败的图片
-      const validImages = imageDataList.filter(img => img.success)
-      if (validImages.length === 0) {
-        throw new Error('所有图片下载失败')
-      }
-      
-      if (validImages.length < imageUrls.length) {
-        logger?.warn('部分图片下载失败，将使用剩余图片继续', { 
-          total: imageUrls.length, 
-          success: validImages.length 
-        })
-      }
-
+      // 2. 构建请求体
       const requestBody: any = {
-        model: this.config.modelId || 'veo3.1-fast',
+        model: modelId,
         prompt: prompt,
-        images: validImages.map(({ data, mimeType }) => `data:${mimeType};base64,${data}`),
-        enhance_prompt: options?.enhancePrompt ?? true,
+        images: [`data:${mimeType};base64,${imageBase64}`],
         aspect_ratio: options?.aspectRatio || '16:9'
       }
 
-      logger?.info('提交 Veo 视频生成任务', { 
-        model: requestBody.model,
+      // 添加可选参数
+      if (options?.duration) {
+        requestBody.duration = options.duration
+      }
+
+      logger?.info('【单图模式】提交视频生成任务', { 
+        model: modelId,
         promptLength: prompt.length,
         aspectRatio: requestBody.aspect_ratio
       })
@@ -255,31 +102,35 @@ export class YunwuVideoProvider implements VideoProvider {
       const taskId = response.id
       if (!taskId) {
         logger?.error('未能获取任务ID', { response })
-        throw new Error('未能获取任务ID')
+        throw new Error('未能获取任务ID，请检查 API 响应格式')
       }
 
-      logger?.info('Veo 视频任务已创建', { taskId, status: response.status })
+      logger?.info('【单图模式】视频任务已创建', { taskId, model: modelId })
       return taskId
 
     } catch (error: any) {
-      logger?.error('创建 Veo 视频任务失败', { error: sanitizeError(error) })
+      logger?.error('【单图模式】创建视频任务失败', { error: sanitizeError(error), model: modelId })
       throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
     }
   }
 
   /**
-   * 可灵 Kling 视频生成（图生视频）
+   * 多图生成视频任务
+   * 使用专门的多图模型
    */
-  private async createKlingTask(
+  private async createMultiImageTask(
     prompt: string,
     imageUrls: string[],
     options?: VideoGenerationOptions
   ): Promise<string> {
-    const { logger, ctx } = this.config
+    const { logger, ctx, multiImageModelId } = this.config
+
+    if (!multiImageModelId) {
+      throw new Error('未配置多图生成视频模型ID')
+    }
 
     try {
-      // 下载所有图片（可灵支持多图参考）
-      logger?.info('下载输入图片', { imageCount: imageUrls.length })
+      logger?.info('【多图模式】下载输入图片', { imageCount: imageUrls.length, model: multiImageModelId })
       
       const imageDataList = await Promise.all(
         imageUrls.map(async (url, idx) => {
@@ -302,411 +153,141 @@ export class YunwuVideoProvider implements VideoProvider {
       if (validImages.length === 0) {
         throw new Error('所有图片下载失败')
       }
-
-      // 第一张作为主图，其余作为参考图
-      const primaryImage = validImages[0]
-      const referenceImages = validImages.slice(1)
-
-      const requestBody: any = {
-        model_name: this.config.modelId || 'kling-v2-master',
-        prompt: prompt,
-        image: `data:${primaryImage.mimeType};base64,${primaryImage.data}`,
-        mode: options?.mode || 'std',
-        duration: String(options?.duration || 5),
-        aspect_ratio: options?.aspectRatio || '16:9',
-        multi_shot: options?.multiShot || false,
-        sound: options?.sound || 'off'
-      }
-
-      // 添加参考图片（如果有多张）
-      if (referenceImages.length > 0) {
-        requestBody.reference_images = referenceImages.map(img => ({
-          image: `data:${img.mimeType};base64,${img.data}`,
-          type: 'subject'  // 或 'face'，根据需求选择
-        }))
-      }
-
-      if (options?.cameraControl) {
-        requestBody.camera_control = options.cameraControl
-      }
-
-      logger?.info('提交可灵视频生成任务', { 
-        model: requestBody.model_name,
-        promptLength: prompt.length,
-        mode: requestBody.mode,
-        duration: requestBody.duration,
-        referenceImageCount: referenceImages.length
-      })
-
-      const response = await ctx.http.post(
-        `${this.config.apiBase}/kling/v1/videos/image2video`,
-        requestBody,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.config.apiKey}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: this.config.apiTimeout * 1000
-        }
-      )
-
-      // 可灵响应格式：{ code, message, data: { task_id } }
-      if (response.code !== 0 && response.code !== undefined) {
-        const errorMsg = response.message || '创建任务失败'
-        throw new Error(sanitizeString(errorMsg))
-      }
-
-      const taskId = response.data?.task_id || response.task_id
-      if (!taskId) {
-        logger?.error('未能获取任务ID', { response })
-        throw new Error('未能获取任务ID')
-      }
-
-      logger?.info('可灵视频任务已创建', { taskId })
-      return String(taskId)
-
-    } catch (error: any) {
-      logger?.error('创建可灵视频任务失败', { error: sanitizeError(error) })
-      throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
-    }
-  }
-
-  /**
-   * Seedance 视频生成（豆包视频，与可灵接口相同）
-   */
-  private async createSeedanceTask(
-    prompt: string,
-    imageUrls: string[],
-    options?: VideoGenerationOptions
-  ): Promise<string> {
-    const { logger, ctx } = this.config
-
-    try {
-      // Seedance 同可灵接口，支持多图
-      logger?.info('下载输入图片', { imageCount: imageUrls.length })
       
-      const imageDataList = await Promise.all(
-        imageUrls.map(async (url, idx) => {
-          try {
-            const { data, mimeType } = await downloadImageAsBase64(
-              ctx,
-              url,
-              this.config.apiTimeout,
-              logger
-            )
-            return { data, mimeType, index: idx, success: true }
-          } catch (error) {
-            logger?.error(`下载第 ${idx + 1} 张图片失败`, { url, error: sanitizeError(error) })
-            return { data: '', mimeType: '', index: idx, success: false }
-          }
+      if (validImages.length < imageUrls.length) {
+        logger?.warn('部分图片下载失败，将使用剩余图片继续', { 
+          total: imageUrls.length, 
+          success: validImages.length 
         })
-      )
-      
-      const validImages = imageDataList.filter(img => img.success)
-      if (validImages.length === 0) {
-        throw new Error('所有图片下载失败')
       }
 
-      const primaryImage = validImages[0]
-      const referenceImages = validImages.slice(1)
-
+      // 构建请求体 - 使用多图模型
       const requestBody: any = {
-        model_name: this.config.modelId || 'seedance-v1',
+        model: multiImageModelId,
         prompt: prompt,
-        image: `data:${primaryImage.mimeType};base64,${primaryImage.data}`,
-        mode: options?.mode || 'std',
-        duration: String(options?.duration || 5),
+        images: validImages.map(({ data, mimeType }) => `data:${mimeType};base64,${data}`),
         aspect_ratio: options?.aspectRatio || '16:9'
       }
 
-      // 添加参考图片
-      if (referenceImages.length > 0) {
-        requestBody.reference_images = referenceImages.map(img => ({
-          image: `data:${img.mimeType};base64,${img.data}`,
-          type: 'subject'
-        }))
+      // 添加可选参数
+      if (options?.duration) {
+        requestBody.duration = options.duration
       }
 
-      logger?.info('提交 Seedance 视频生成任务', { 
-        model: requestBody.model_name,
+      logger?.info('【多图模式】提交视频生成任务', { 
+        model: multiImageModelId,
         promptLength: prompt.length,
-        referenceImageCount: referenceImages.length
+        imageCount: validImages.length,
+        aspectRatio: requestBody.aspect_ratio
       })
 
       const response = await ctx.http.post(
-        `${this.config.apiBase}/kling/v1/videos/image2video`,
+        `${this.config.apiBase}/v1/video/create`,
         requestBody,
         {
           headers: {
             'Authorization': `Bearer ${this.config.apiKey}`,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
           },
           timeout: this.config.apiTimeout * 1000
         }
       )
 
-      if (response.code !== 0 && response.code !== undefined) {
-        const errorMsg = response.message || '创建任务失败'
+      if (response.error) {
+        const errorMsg = response.error.message || response.error.type || '创建任务失败'
         throw new Error(sanitizeString(errorMsg))
       }
 
-      const taskId = response.data?.task_id || response.task_id
+      const taskId = response.id || response.data?.task_id
       if (!taskId) {
         logger?.error('未能获取任务ID', { response })
         throw new Error('未能获取任务ID')
       }
 
-      logger?.info('Seedance 视频任务已创建', { taskId })
+      logger?.info('【多图模式】视频任务已创建', { taskId, model: multiImageModelId })
       return String(taskId)
 
     } catch (error: any) {
-      logger?.error('创建 Seedance 视频任务失败', { error: sanitizeError(error) })
-      throw new Error(`创建视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
+      logger?.error('【多图模式】创建视频任务失败', { error: sanitizeError(error), model: multiImageModelId })
+      throw new Error(`创建多图视频任务失败: ${sanitizeString(error.message || '未知错误')}`)
     }
   }
 
   /**
-   * 查询任务状态
-   * 根据 apiFormat 路由到不同的查询实现
-   */
-  async queryTaskStatus(taskId: string): Promise<VideoTaskStatus> {
-    const format = this.config.apiFormat || 'sora'
-    
-    switch (format) {
-      case 'veo':
-        return this.queryVeoTaskStatus(taskId)
-      case 'kling':
-      case 'seedance':
-        return this.queryKlingTaskStatus(taskId)
-      case 'sora':
-      default:
-        return this.querySoraTaskStatus(taskId)
-    }
-  }
-
-  /**
-   * 查询 Sora 任务状态
-   */
-  private async querySoraTaskStatus(taskId: string): Promise<VideoTaskStatus> {
-    const { logger, ctx } = this.config
-
-    try {
-      const response = await ctx.http.get(
-        `${this.config.apiBase}/v1/video/query?id=${encodeURIComponent(taskId)}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.config.apiKey}`,
-            'Accept': 'application/json'
-          },
-          timeout: this.config.apiTimeout * 1000
-        }
-      )
-
-      const status = response.status || 'pending'
-      const videoUrl = response.video_url || null
-
-      return {
-        status: status as VideoTaskStatus['status'],
-        taskId: response.id || taskId,
-        videoUrl: videoUrl || undefined,
-        error: response.error,
-        progress: response.progress
-      }
-
-    } catch (error: any) {
-      logger?.error('查询 Sora 任务状态失败', { taskId, error: sanitizeError(error) })
-      throw new Error(`查询任务失败: ${sanitizeString(error.message || '未知错误')}`)
-    }
-  }
-
-  /**
-   * 查询 Veo 任务状态
-   */
-  private async queryVeoTaskStatus(taskId: string): Promise<VideoTaskStatus> {
-    const { logger, ctx } = this.config
-
-    try {
-      const response = await ctx.http.get(
-        `${this.config.apiBase}/v1/video/query?id=${encodeURIComponent(taskId)}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.config.apiKey}`,
-            'Accept': 'application/json'
-          },
-          timeout: this.config.apiTimeout * 1000
-        }
-      )
-
-      const status = response.status || 'pending'
-      const videoUrl = response.video_url || null
-
-      return {
-        status: status as VideoTaskStatus['status'],
-        taskId: response.id || taskId,
-        videoUrl: videoUrl || undefined,
-        error: response.error,
-        progress: response.progress
-      }
-
-    } catch (error: any) {
-      logger?.error('查询 Veo 任务状态失败', { taskId, error: sanitizeError(error) })
-      throw new Error(`查询任务失败: ${sanitizeString(error.message || '未知错误')}`)
-    }
-  }
-
-  /**
-   * 查询可灵/Seedance 任务状态
-   */
-  private async queryKlingTaskStatus(taskId: string): Promise<VideoTaskStatus> {
-    const { logger, ctx } = this.config
-
-    try {
-      const response = await ctx.http.get(
-        `${this.config.apiBase}/kling/v1/videos/${encodeURIComponent(taskId)}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.config.apiKey}`,
-            'Accept': 'application/json'
-          },
-          timeout: this.config.apiTimeout * 1000
-        }
-      )
-
-      // 可灵响应格式：{ code, data: { task_status, video_url } }
-      const rawStatus = response.data?.task_status || response.task_status || 'pending'
-      const videoUrl = response.data?.video_url || response.video_url || null
-
-      // 映射状态
-      const statusMap: Record<string, VideoTaskStatus['status']> = {
-        'submitted': 'pending',
-        'processing': 'processing',
-        'succeed': 'completed',
-        'failed': 'failed',
-        'pending': 'pending'
-      }
-
-      return {
-        status: statusMap[rawStatus] || 'pending',
-        taskId: String(taskId),
-        videoUrl: videoUrl || undefined,
-        error: response.data?.task_error || response.message
-      }
-
-    } catch (error: any) {
-      logger?.error('查询可灵任务状态失败', { taskId, error: sanitizeError(error) })
-      throw new Error(`查询任务失败: ${sanitizeString(error.message || '未知错误')}`)
-    }
-  }
-
-  /**
-   * 轮询等待任务完成
-   */
-  private async pollTaskCompletion(
-    taskId: string,
-    maxWaitTime: number = 300,
-    pollInterval: number = 3,
-    onProgress?: (status: VideoTaskStatus) => void | Promise<void>
-  ): Promise<string> {
-    const { logger } = this.config
-    const startTime = Date.now()
-    let consecutiveFailures = 0
-    const maxConsecutiveFailures = 5
-
-    while (true) {
-      const elapsed = (Date.now() - startTime) / 1000
-
-      if (elapsed > maxWaitTime) {
-        logger?.warn('视频生成超时', { taskId, elapsed, maxWaitTime })
-        throw new Error(`视频生成超时（已等待${Math.floor(elapsed)}秒），任务ID: ${taskId}`)
-      }
-
-      try {
-        const status = await this.queryTaskStatus(taskId)
-        consecutiveFailures = 0
-        logger?.debug('任务状态', { taskId, status: status.status, elapsed: Math.floor(elapsed) })
-
-        if (onProgress) {
-          await onProgress(status)
-        }
-
-        if (status.status === 'completed' && status.videoUrl) {
-          logger?.info('视频生成完成', { taskId, elapsed: Math.floor(elapsed) })
-          return status.videoUrl
-        }
-
-        if (status.status === 'failed') {
-          throw new Error(status.error || '视频生成失败')
-        }
-
-      } catch (error: any) {
-        consecutiveFailures++
-        logger?.warn('查询任务状态失败，继续重试', { 
-          taskId, 
-          consecutiveFailures,
-          maxConsecutiveFailures,
-          error: sanitizeError(error)
-        })
-
-        if (consecutiveFailures >= maxConsecutiveFailures) {
-          logger?.error('连续查询失败次数过多，终止轮询', { 
-            taskId, 
-            consecutiveFailures,
-            elapsed: Math.floor(elapsed)
-          })
-          throw new Error(`查询任务状态连续失败 ${consecutiveFailures} 次，任务ID: ${taskId}`)
-        }
-
-        await new Promise(resolve => setTimeout(resolve, pollInterval * 1000 * 2))
-        continue
-      }
-
-      await new Promise(resolve => setTimeout(resolve, pollInterval * 1000))
-    }
-  }
-
-  /**
-   * 等待指定任务完成并返回视频 URL
-   */
-  async waitForVideo(taskId: string, maxWaitTime: number = 300): Promise<string> {
-    return await this.pollTaskCompletion(taskId, maxWaitTime)
-  }
-
-  /**
-   * 生成视频（主入口）
+   * 生成视频（包含轮询等待）
+   * @returns 视频URL
    */
   async generateVideo(
     prompt: string,
     imageUrls: string | string[],
     options?: VideoGenerationOptions,
-    maxWaitTime: number = 300
+    maxWaitTime?: number
   ): Promise<string> {
     const { logger } = this.config
-    const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls]
+    const waitTime = maxWaitTime || 300 // 默认5分钟
+    const pollInterval = 5000 // 5秒轮询一次
+    const maxAttempts = Math.ceil(waitTime * 1000 / pollInterval)
+
+    // 1. 创建任务
+    const taskId = await this.createVideoTask(prompt, imageUrls, options)
+    logger?.info('视频任务已创建，开始轮询', { taskId, maxWaitTime: waitTime })
+
+    // 2. 轮询等待结果
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, pollInterval))
+      
+      const status = await this.queryTaskStatus(taskId)
+      logger?.debug('轮询任务状态', { taskId, status: status.status, attempt })
+
+      if (status.status === 'completed') {
+        if (status.videoUrl) {
+          logger?.info('视频生成完成', { taskId, videoUrl: status.videoUrl })
+          return status.videoUrl
+        }
+        throw new Error('视频已完成但未返回视频URL')
+      }
+
+      if (status.status === 'failed') {
+        throw new Error(status.error || '视频生成失败')
+      }
+    }
+
+    throw new Error(`等待超时，任务ID: ${taskId}`)
+  }
+
+  /**
+   * 查询任务状态
+   */
+  async queryTaskStatus(taskId: string): Promise<VideoTaskStatus> {
+    const { logger, ctx } = this.config
 
     try {
-      logger?.info('开始生成视频', { 
-        prompt, 
-        imageCount: urls.length,
-        options,
-        apiFormat: this.config.apiFormat || 'sora'
-      })
+      const response = await ctx.http.get(
+        `${this.config.apiBase}/v1/video/query?id=${encodeURIComponent(taskId)}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.config.apiKey}`,
+            'Accept': 'application/json'
+          },
+          timeout: this.config.apiTimeout * 1000
+        }
+      )
 
-      // 1. 创建任务
-      const taskId = await this.createVideoTask(prompt, urls, options)
+      const status = response.status || 'pending'
+      const videoUrl = response.video_url || null
 
-      // 2. 等待几秒后再开始查询
-      logger?.debug('任务已创建，等待 3 秒后开始查询', { taskId })
-      await new Promise(resolve => setTimeout(resolve, 3000))
-
-      // 3. 轮询等待完成
-      const videoUrl = await this.waitForVideo(taskId, maxWaitTime)
-
-      logger?.info('视频生成完成', { taskId, videoUrl })
-      return videoUrl
+      return {
+        status: status as VideoTaskStatus['status'],
+        taskId: response.id || taskId,
+        videoUrl: videoUrl || undefined,
+        error: response.error,
+        progress: response.progress
+      }
 
     } catch (error: any) {
-      logger?.error('视频生成失败', { error: sanitizeError(error) })
-      throw error
+      logger?.error('查询任务状态失败', { taskId, error: sanitizeError(error) })
+      throw new Error(`查询任务失败: ${sanitizeString(error.message || '未知错误')}`)
     }
   }
 }

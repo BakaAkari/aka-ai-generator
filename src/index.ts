@@ -29,7 +29,7 @@ const COMMANDS = {
   MULTI_IMG_VIDEO: '多图生视频'
 } as const
 
-export type ImageProvider = 'yunwu' | 'gptgod' | 'gemini'
+export type ImageProvider = 'yunwu'
 export type ApiFormat = 'gemini' | 'openai'
 
 export interface ModelMappingConfig {
@@ -69,12 +69,19 @@ interface ImageRequestContext {
   aspectRatio?: '1:1' | '4:3' | '16:9' | '9:16' | '3:2' | '2:3'
 }
 
+// 视频模型配置 - 用户自定义单图/多图模型ID
+export interface VideoModelConfig {
+  singleImageModelId: string  // 单图生视频模型ID
+  multiImageModelId: string   // 多图生视频模型ID
+}
+
 // 插件配置接口
 export interface Config {
   provider: ImageProvider
   yunwuApiKey: string
   yunwuModelId: string
   yunwuApiFormat?: ApiFormat
+  // 以下字段保留兼容性但不再使用
   gptgodApiKey: string
   gptgodModelId: string
   geminiApiKey: string
@@ -97,13 +104,10 @@ export interface Config {
   securityBlockWarningThreshold: number
   // 视频生成配置（独立于图像生成配置）
   enableVideoGeneration: boolean
-  videoProvider: 'yunwu' | 'gptgod'  // 视频生成供应商
-  videoApiFormat: 'sora' | 'veo' | 'kling' | 'seedance'  // 视频生成模型格式
   videoApiKey: string     // 视频生成 API 密钥（云雾）
   videoApiBase: string     // 视频生成 API 地址（云雾）
-  videoModelId: string     // 视频生成模型ID（云雾）
-  gptgodVideoApiKey: string  // GPTGod 视频生成 API 密钥
-  gptgodVideoModelId: string  // GPTGod 视频生成模型ID（可选）
+  singleImageVideoModel: string  // 单图生视频模型ID
+  multiImageVideoModel: string   // 多图生视频模型ID
   videoMaxWaitTime: number
   videoCreditsMultiplier: number
   videoStyles: VideoStyleConfig[]
@@ -116,59 +120,22 @@ const StyleItemSchema = Schema.object({
 })
 
 export const Config: Schema<Config> = Schema.intersect([
-  // ===== 1. 供应商选择 =====
+  // ===== 1. API 配置 =====
   Schema.object({
-    provider: Schema.union([
-      Schema.const('yunwu').description('云雾 Gemini 服务'),
-      Schema.const('gptgod').description('GPTGod 服务'),
-      Schema.const('gemini').description('Google Gemini 原生'),
-    ] as const)
-      .default('yunwu' as ImageProvider)
-      .description('图像生成供应商'),
-  }).description('🎨 供应商选择'),
-
-  // ===== 2. API 配置（根据 provider 条件显示） =====
-  Schema.union([
-    // GPTGod 配置 - 需要 required() 因为不是默认值
-    Schema.object({
-      provider: Schema.const('gptgod' as const).required(),
-      gptgodApiKey: Schema.string().role('secret').required().description('GPTGod API 密钥'),
-      gptgodModelId: Schema.string().default('nano-banana').description('GPTGod 模型ID'),
-      // 其他 provider 的隐藏默认值
-      yunwuApiKey: Schema.string().role('secret').default('').hidden(),
-      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
-      geminiApiKey: Schema.string().role('secret').default('').hidden(),
-      geminiModelId: Schema.string().default('gemini-2.5-flash').hidden(),
-      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
-    }),
-    // Gemini 配置 - 需要 required() 因为不是默认值
-    Schema.object({
-      provider: Schema.const('gemini' as const).required(),
-      geminiApiKey: Schema.string().role('secret').required().description('Gemini API 密钥'),
-      geminiModelId: Schema.string().default('gemini-2.5-flash').description('Gemini 模型ID'),
-      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').description('Gemini API 基础地址'),
-      // 其他 provider 的隐藏默认值
-      yunwuApiKey: Schema.string().role('secret').default('').hidden(),
-      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
-      gptgodApiKey: Schema.string().role('secret').default('').hidden(),
-      gptgodModelId: Schema.string().default('nano-banana').hidden(),
-    }),
-    // 云雾配置 - 不需要 required() 因为 'yunwu' 是默认值（放在最后作为 fallback）
-    Schema.object({
-      yunwuApiKey: Schema.string().role('secret').required().description('云雾 API 密钥'),
-      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
-      yunwuApiFormat: Schema.union([
-        Schema.const('gemini').description('Gemini 原生'),
-        Schema.const('openai').description('GPT Image'),
-      ]).default('gemini').description('接口格式'),
-      // 其他 provider 的隐藏默认值
-      gptgodApiKey: Schema.string().role('secret').default('').hidden(),
-      gptgodModelId: Schema.string().default('nano-banana').hidden(),
-      geminiApiKey: Schema.string().role('secret').default('').hidden(),
-      geminiModelId: Schema.string().default('gemini-2.5-flash').hidden(),
-      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
-    }),
-  ] as const) as any,
+    provider: Schema.const('yunwu').default('yunwu').description('图像生成供应商'),
+    yunwuApiKey: Schema.string().role('secret').required().description('云雾 API 密钥'),
+    yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
+    yunwuApiFormat: Schema.union([
+      Schema.const('gemini').description('Gemini 原生'),
+      Schema.const('openai').description('GPT Image'),
+    ]).default('gemini').description('接口格式'),
+    // 保留兼容性字段（隐藏）
+    gptgodApiKey: Schema.string().role('secret').default('').hidden(),
+    gptgodModelId: Schema.string().default('').hidden(),
+    geminiApiKey: Schema.string().role('secret').default('').hidden(),
+    geminiModelId: Schema.string().default('').hidden(),
+    geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
+  }).description('🎨 图像生成配置'),
 
   // ===== 3. 通用设置 =====
   Schema.object({
@@ -208,35 +175,14 @@ export const Config: Schema<Config> = Schema.intersect([
 
   // ===== 5. 模型映射 =====
   Schema.object({
-    modelMappings: Schema.array(Schema.intersect([
-      Schema.object({
-        suffix: Schema.string().required().description('切换模型参数名'),
-        provider: Schema.union([
-          Schema.const('yunwu').description('云雾 Gemini 服务'),
-          Schema.const('gptgod').description('GPTGod 服务'),
-          Schema.const('gemini').description('Google Gemini 原生'),
-        ] as const).description('覆盖供应商'),
-        modelId: Schema.string().required().description('模型ID')
-      }),
-      // 条件显示 apiFormat（仅当 provider 为 yunwu 时显示）
-      Schema.union([
-        Schema.object({
-          provider: Schema.const('yunwu').required(),
-          apiFormat: Schema.union([
-            Schema.const('gemini').description('Gemini 原生'),
-            Schema.const('openai').description('GPT Image'),
-          ]).default('gemini').description('接口格式')
-        }),
-        Schema.object({
-          provider: Schema.const('gptgod').required(),
-          apiFormat: Schema.string().default('').hidden()
-        }),
-        Schema.object({
-          provider: Schema.const('gemini').required(),
-          apiFormat: Schema.string().default('').hidden()
-        })
-      ])
-    ])).role('table').default([]).description('根据 -后缀切换模型/供应商'),
+    modelMappings: Schema.array(Schema.object({
+      suffix: Schema.string().required().description('切换模型参数名'),
+      modelId: Schema.string().required().description('模型ID'),
+      apiFormat: Schema.union([
+        Schema.const('gemini').description('Gemini 原生'),
+        Schema.const('openai').description('GPT Image'),
+      ]).default('gemini').description('接口格式')
+    }).collapse()).role('table').default([]).description('根据 -后缀切换模型'),
   }).description('🔀 模型映射'),
 
   // ===== 6. 限流与配额 =====
@@ -298,38 +244,20 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.union([
     Schema.object({
       enableVideoGeneration: Schema.const(true).required(),
-      videoProvider: Schema.union([
-        Schema.const('yunwu').description('云雾服务'),
-        Schema.const('gptgod').description('GPTGod 服务'),
-      ] as const)
-        .default('yunwu' as const)
-        .description('视频生成供应商'),
-      videoApiFormat: Schema.union([
-        Schema.const('sora').description('Sora'),
-        Schema.const('veo').description('Veo'),
-        Schema.const('kling').description('可灵 Kling'),
-        Schema.const('seedance').description('Seedance（豆包）'),
-      ]).default('sora').description('视频生成模型'),
-      // 云雾配置
       videoApiKey: Schema.string()
         .role('secret')
-        .default('')
-        .description('视频生成 API 密钥（云雾，独立于图像生成配置）'),
+        .required()
+        .description('云雾视频 API 密钥'),
       videoApiBase: Schema.string()
         .default('https://yunwu.ai')
-        .description('视频生成 API 地址（云雾）'),
-      videoModelId: Schema.string()
+        .description('云雾视频 API 地址'),
+      singleImageVideoModel: Schema.string()
         .default('sora-2')
-        .description('视频生成模型ID（云雾）'),
-      // GPTGod 配置
-      gptgodVideoApiKey: Schema.string()
-        .role('secret')
-        .default('')
-        .description('视频生成 API 密钥（GPTGod）'),
-      gptgodVideoModelId: Schema.string()
-        .default('')
-        .description('视频生成模型ID（GPTGod，可选）'),
-      // 通用配置
+        .description('单图生视频模型ID（如 sora-2, kling-v2-master 等）'),
+      multiImageVideoModel: Schema.string()
+        .default('sora-2')
+        .description('多图生视频模型ID（如 sora-2-storyboard, kling-multi-image 等）'),
+      // 通用视频配置
       videoMaxWaitTime: Schema.number()
         .default(300)
         .min(60)
@@ -355,13 +283,10 @@ export const Config: Schema<Config> = Schema.intersect([
       ]).description('视频风格预设'),
     }),
     Schema.object({
-      videoProvider: Schema.union([Schema.const('yunwu'), Schema.const('gptgod')] as const).default('yunwu' as const).hidden(),
-      videoApiFormat: Schema.union(['sora', 'veo', 'kling', 'seedance'] as const).default('sora').hidden(),
       videoApiKey: Schema.string().role('secret').default('').hidden(),
       videoApiBase: Schema.string().default('https://yunwu.ai').hidden(),
-      videoModelId: Schema.string().default('sora-2').hidden(),
-      gptgodVideoApiKey: Schema.string().role('secret').default('').hidden(),
-      gptgodVideoModelId: Schema.string().default('').hidden(),
+      singleImageVideoModel: Schema.string().default('sora-2').hidden(),
+      multiImageVideoModel: Schema.string().default('sora-2').hidden(),
       videoMaxWaitTime: Schema.number().default(300).hidden(),
       videoCreditsMultiplier: Schema.number().default(5).hidden(),
       videoStyles: Schema.array(Schema.object({
@@ -403,31 +328,29 @@ export function apply(ctx: Context, config: Config) {
 
   // 创建视频 Provider 实例（如果启用）
   let videoProvider: VideoProvider | null = null
+  
   if (config.enableVideoGeneration) {
     // 验证视频配置
-    const isYunwu = config.videoProvider === 'yunwu'
-    const isGptgod = config.videoProvider === 'gptgod'
-    
-    if (isYunwu && !config.videoApiKey) {
+    if (!config.videoApiKey) {
       logger.warn('视频生成功能已启用，但未配置云雾视频 API 密钥，视频功能将不可用')
-    } else if (isGptgod && !config.gptgodVideoApiKey) {
-      logger.warn('视频生成功能已启用，但未配置 GPTGod 视频 API 密钥，视频功能将不可用')
+    } else if (!config.singleImageVideoModel || !config.multiImageVideoModel) {
+      logger.warn('视频生成功能已启用，但未配置单图或多图视频模型ID')
     } else {
       try {
+        // 传入单图和多图模型ID，由 Provider 根据图片数量选择
         videoProvider = createVideoProvider({
-          provider: config.videoProvider as VideoProviderType,
-          apiFormat: config.videoApiFormat,
+          provider: 'yunwu',
           yunwuApiKey: config.videoApiKey,
-          yunwuVideoModelId: config.videoModelId,
+          yunwuVideoModelId: config.singleImageVideoModel,
           yunwuVideoApiBase: config.videoApiBase,
-          gptgodVideoApiKey: config.gptgodVideoApiKey,
-          gptgodVideoModelId: config.gptgodVideoModelId,
+          // 多图模型ID传给provider，供多图生成功能使用
+          yunwuMultiImageModelId: config.multiImageVideoModel,
           apiTimeout: config.apiTimeout,
           logLevel: config.logLevel,
           logger,
           ctx
         })
-        logger.info(`视频生成功能已启用 (供应商: ${config.videoProvider}, 格式: ${config.videoApiFormat})`)
+        logger.info(`视频生成功能已启用 (单图模型: ${config.singleImageVideoModel}, 多图模型: ${config.multiImageVideoModel})`)
       } catch (error) {
         logger.error('创建视频 Provider 失败', { error: sanitizeError(error) })
         videoProvider = null
@@ -1446,6 +1369,9 @@ export function apply(ctx: Context, config: Config) {
                 await userManager.deletePendingVideoTask(trimmedTaskId)
               }
 
+              // 释放视频任务锁，允许用户发起新任务
+              userManager.endVideoTask(session.userId)
+
               return '视频生成完成！'
             } else if (status.status === 'processing' || status.status === 'pending') {
               const progressText = status.progress ? `（进度：${status.progress}%）` : ''
@@ -1455,6 +1381,8 @@ export function apply(ctx: Context, config: Config) {
               if (pending && !pending.charged) {
                 await userManager.deletePendingVideoTask(trimmedTaskId)
               }
+              // 释放视频任务锁
+              userManager.endVideoTask(session.userId)
               return `视频生成失败：${status.error || '未知错误'}`
             } else {
               return `❓ 未知状态：${status.status}`
@@ -1515,6 +1443,11 @@ export function apply(ctx: Context, config: Config) {
               logger.error('查询单个视频任务失败', { taskId: task.taskId, error: sanitizeError(error) })
               messages.push(`⚠️ 任务 ${task.taskId.substring(0, 20)}... 查询失败：${sanitizeString(error.message)}`)
             }
+          }
+
+          // 如果有已完成或失败的任务，释放视频任务锁
+          if (completedCount > 0 || failedCount > 0) {
+            userManager.endVideoTask(session.userId)
           }
 
           // 汇总结果

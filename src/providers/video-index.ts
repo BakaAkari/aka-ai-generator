@@ -1,18 +1,14 @@
 import { VideoProvider } from './types'
-import { YunwuVideoProvider, VideoApiFormat } from './yunwu-video'
-import { GPTGodVideoProvider, GPTGodVideoApiFormat } from './gptgod-video'
+import { YunwuVideoProvider } from './yunwu-video'
 
-export type VideoProviderType = 'yunwu' | 'gptgod'
-export type VideoApiFormatType = VideoApiFormat
+export type VideoProviderType = 'yunwu'
 
 export interface VideoProviderFactoryConfig {
   provider: VideoProviderType
-  apiFormat?: VideoApiFormatType
   yunwuApiKey: string
   yunwuVideoModelId: string
   yunwuVideoApiBase: string
-  gptgodVideoApiKey: string
-  gptgodVideoModelId: string
+  yunwuMultiImageModelId?: string  // 多图生成视频模型ID
   apiTimeout: number
   logLevel: 'info' | 'debug'
   logger: any
@@ -29,28 +25,11 @@ export function createVideoProvider(config: VideoProviderFactoryConfig): VideoPr
         apiKey: config.yunwuApiKey,
         modelId: config.yunwuVideoModelId,
         apiBase: config.yunwuVideoApiBase,
-        apiFormat: config.apiFormat || 'sora',
         apiTimeout: config.apiTimeout,
         logLevel: config.logLevel,
         logger: config.logger,
-        ctx: config.ctx
-      })
-
-    case 'gptgod':
-      // GPTGod 不支持 seedance
-      if (config.apiFormat === 'seedance') {
-        throw new Error('GPTGod 不支持 Seedance 视频生成，请使用云雾供应商或将模型格式切换为 Sora/Veo/可灵')
-      }
-      
-      return new GPTGodVideoProvider({
-        apiKey: config.gptgodVideoApiKey,
-        modelId: config.gptgodVideoModelId,
-        apiBase: 'https://api.gptgod.online',
-        apiFormat: (config.apiFormat as GPTGodVideoApiFormat) || 'sora',
-        apiTimeout: config.apiTimeout,
-        logLevel: config.logLevel,
-        logger: config.logger,
-        ctx: config.ctx
+        ctx: config.ctx,
+        multiImageModelId: config.yunwuMultiImageModelId
       })
 
     default:
@@ -60,6 +39,3 @@ export function createVideoProvider(config: VideoProviderFactoryConfig): VideoPr
 
 export type { VideoProvider, VideoTaskStatus, VideoGenerationOptions } from './types'
 export { YunwuVideoProvider } from './yunwu-video'
-export { GPTGodVideoProvider } from './gptgod-video'
-export type { VideoApiFormat } from './yunwu-video'
-export type { GPTGodVideoApiFormat } from './gptgod-video'
