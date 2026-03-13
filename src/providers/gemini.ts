@@ -1,4 +1,4 @@
-import { ImageProvider, ProviderConfig } from './types'
+import { ImageProvider, ProviderConfig, ImageGenerationOptions } from './types'
 import { sanitizeError, sanitizeString, downloadImageAsBase64 } from './utils'
 
 export interface GeminiConfig extends ProviderConfig {
@@ -260,6 +260,7 @@ export class GeminiProvider implements ImageProvider {
     prompt: string,
     imageUrls: string | string[],
     numImages: number,
+    options?: ImageGenerationOptions,
     onImageGenerated?: (imageUrl: string, index: number, total: number) => void | Promise<void>
   ): Promise<string[]> {
     // 处理空数组或空字符串的情况
@@ -306,6 +307,18 @@ export class GeminiProvider implements ImageProvider {
     // 每次调用只能生成一张图片，需要循环调用
     const allImages: string[] = []
 
+    // 构建 generationConfig
+    const generationConfig: any = {
+      responseModalities: ["IMAGE"]
+    }
+    
+    // 如果指定了宽高比，添加 imageConfig
+    if (options?.aspectRatio) {
+      generationConfig.imageConfig = {
+        aspectRatio: options.aspectRatio
+      }
+    }
+
     for (let i = 0; i < numImages; i++) {
       // 构建 Gemini API 请求体
       const requestData = {
@@ -318,9 +331,7 @@ export class GeminiProvider implements ImageProvider {
             ]
           }
         ],
-        generationConfig: {
-          responseModalities: ["IMAGE"]
-        },
+        generationConfig,
         safetySettings: [
           { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
           { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
@@ -329,7 +340,14 @@ export class GeminiProvider implements ImageProvider {
         ]
       }
 
-      logger.debug('调用 Gemini API', { prompt, imageCount: urls.length, numImages, current: i + 1, endpoint })
+      logger.debug('调用 Gemini API', { 
+        prompt, 
+        imageCount: urls.length, 
+        numImages, 
+        current: i + 1, 
+        endpoint,
+        aspectRatio: options?.aspectRatio 
+      })
 
       try {
         const response = await ctx.http.post(

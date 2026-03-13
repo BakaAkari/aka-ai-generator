@@ -1,19 +1,19 @@
 import { h, Session } from 'koishi'
-import { YunwuVideoProvider } from '../providers/yunwu-video'
+import { VideoProvider } from '../providers/types'
 import { UserManager } from '../services/UserManager'
 
 interface RunVideoGenerationFlowParams {
   session: Session
   userId: string
   userManager: UserManager
-  videoProvider: YunwuVideoProvider
+  videoProvider: VideoProvider
   logger: any
   sanitizeString: (message: string) => string
   sanitizeError: (error: any) => any
   recordUserUsage: (session: Session, commandName: string, numImages?: number, sendStatsImmediately?: boolean) => Promise<void>
   commandName: string
   prompt: string
-  imageUrl: string
+  imageUrls: string | string[]
   videoCredits: number
   maxWaitTime: number
   startMessage: string
@@ -35,7 +35,7 @@ export async function runVideoGenerationFlow(params: RunVideoGenerationFlowParam
     recordUserUsage,
     commandName,
     prompt,
-    imageUrl,
+    imageUrls,
     videoCredits,
     maxWaitTime,
     startMessage,
@@ -58,7 +58,7 @@ export async function runVideoGenerationFlow(params: RunVideoGenerationFlowParam
   }
 
   try {
-    const taskId = await videoProvider.createVideoTask(prompt, imageUrl, videoOptions)
+    const taskId = await videoProvider.createVideoTask(prompt, imageUrls, videoOptions)
     createdTaskId = taskId
 
     logVideoEvent('info', '视频任务已创建', {

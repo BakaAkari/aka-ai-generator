@@ -1,28 +1,22 @@
 {
   "name": "koishi-plugin-aka-ai-generator",
   "description": "自用AI生成插件(GPTGod & Yunwu)",
-  "version": "0.9.22",
+  "version": "0.11.6",
   "main": "lib/index.js",
-  "types": "lib/index.d.ts",
+  "typings": "lib/index.d.ts",
   "files": [
-    "lib"
+    "lib",
+    "dist"
   ],
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/BakaAkari/aka-ai-generator.git"
-  },
   "scripts": {
-    "build": "tsc --project tsconfig.json",
-    "clean": "rimraf lib tsconfig.tsbuildinfo",
-    "dev": "tsc --project tsconfig.json --watch",
-    "prepublishOnly": "pnpm run clean && pnpm run build",
-    "typecheck": "tsc --project tsconfig.json --noEmit",
-    "test:video-orchestrator": "tsx ./src/orchestrators/VideoOrchestrator.spec.ts",
-    "test:utils": "tsx ./src/providers/utils.spec.ts",
-    "test:user-manager": "tsx ./src/services/UserManager.spec.ts",
-    "test:input": "tsx ./src/utils/input.spec.ts",
-    "test": "pnpm run test:video-orchestrator && pnpm run test:utils && pnpm run test:user-manager && pnpm run test:input"
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test:video-orchestrator": "npx -y tsx ./src/orchestrators/VideoOrchestrator.spec.ts",
+    "test:utils": "npx -y tsx ./src/providers/utils.spec.ts",
+    "test:user-manager": "npx -y tsx ./src/services/UserManager.spec.ts",
+    "test:input": "npx -y tsx ./src/utils/input.spec.ts",
+    "test": "npm run test:video-orchestrator && npm run test:utils && npm run test:user-manager && npm run test:input"
   },
   "keywords": [
     "chatbot",
@@ -31,9 +25,6 @@
   ],
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "koishi": "^4.18.9",
-    "rimraf": "^6.0.1",
-    "tsx": "^4.20.5",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
@@ -41,8 +32,5 @@
   },
   "dependencies": {
     "jimp": "^0.22.10"
-  },
-  "publishConfig": {
-    "access": "public"
   }
 }
