@@ -29,7 +29,7 @@ const COMMANDS = {
   MULTI_IMG_VIDEO: '多图生视频'
 } as const
 
-export type ImageProvider = 'yunwu'
+export type ImageProvider = 'yunwu' | 'gptgod' | 'gemini'
 export type ApiFormat = 'gemini' | 'openai'
 
 export interface ModelMappingConfig {
@@ -104,6 +104,7 @@ export interface Config {
   securityBlockWarningThreshold: number
   // 视频生成配置（独立于图像生成配置）
   enableVideoGeneration: boolean
+  videoProvider: 'yunwu'  // 视频生成供应商（目前仅支持 yunwu）
   videoApiKey: string     // 视频生成 API 密钥（云雾）
   videoApiBase: string     // 视频生成 API 地址（云雾）
   singleImageVideoModel: string  // 单图生视频模型ID
@@ -120,22 +121,54 @@ const StyleItemSchema = Schema.object({
 })
 
 export const Config: Schema<Config> = Schema.intersect([
-  // ===== 1. API 配置 =====
-  Schema.object({
-    provider: Schema.const('yunwu').default('yunwu').description('图像生成供应商'),
-    yunwuApiKey: Schema.string().role('secret').required().description('云雾 API 密钥'),
-    yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
-    yunwuApiFormat: Schema.union([
-      Schema.const('gemini').description('Gemini 原生'),
-      Schema.const('openai').description('GPT Image'),
-    ]).default('gemini').description('接口格式'),
-    // 保留兼容性字段（隐藏）
-    gptgodApiKey: Schema.string().role('secret').default('').hidden(),
-    gptgodModelId: Schema.string().default('').hidden(),
-    geminiApiKey: Schema.string().role('secret').default('').hidden(),
-    geminiModelId: Schema.string().default('').hidden(),
-    geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
-  }).description('🎨 图像生成配置'),
+  // ===== 1. API 配置（根据供应商动态显示）=====
+  Schema.union([
+    Schema.object({
+      provider: Schema.const('yunwu').required().description('图像生成供应商'),
+      yunwuApiKey: Schema.string().role('secret').required().description('云雾 API 密钥'),
+      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
+      yunwuApiFormat: Schema.union([
+        Schema.const('gemini').description('Gemini 原生'),
+        Schema.const('openai').description('GPT Image'),
+      ]).default('gemini').description('接口格式'),
+      // 其他供应商字段设为隐藏默认值
+      gptgodApiKey: Schema.string().role('secret').default('').hidden(),
+      gptgodModelId: Schema.string().default('').hidden(),
+      geminiApiKey: Schema.string().role('secret').default('').hidden(),
+      geminiModelId: Schema.string().default('').hidden(),
+      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
+    }),
+    Schema.object({
+      provider: Schema.const('gptgod').required().description('图像生成供应商'),
+      gptgodApiKey: Schema.string().role('secret').required().description('GPT God API 密钥'),
+      gptgodModelId: Schema.string().default('').description('GPT God 模型ID'),
+      // 其他供应商字段设为隐藏默认值
+      yunwuApiKey: Schema.string().role('secret').default('').hidden(),
+      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
+      yunwuApiFormat: Schema.union([
+        Schema.const('gemini'),
+        Schema.const('openai'),
+      ]).default('gemini').hidden(),
+      geminiApiKey: Schema.string().role('secret').default('').hidden(),
+      geminiModelId: Schema.string().default('').hidden(),
+      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
+    }),
+    Schema.object({
+      provider: Schema.const('gemini').required().description('图像生成供应商'),
+      geminiApiKey: Schema.string().role('secret').required().description('Google Gemini API 密钥'),
+      geminiModelId: Schema.string().default('gemini-2.5-flash-image').description('Gemini 模型ID'),
+      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').description('Gemini API 地址'),
+      // 其他供应商字段设为隐藏默认值
+      yunwuApiKey: Schema.string().role('secret').default('').hidden(),
+      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
+      yunwuApiFormat: Schema.union([
+        Schema.const('gemini'),
+        Schema.const('openai'),
+      ]).default('gemini').hidden(),
+      gptgodApiKey: Schema.string().role('secret').default('').hidden(),
+      gptgodModelId: Schema.string().default('').hidden(),
+    }),
+  ]).description('🎨 图像生成配置'),
 
   // ===== 3. 通用设置 =====
   Schema.object({
@@ -178,6 +211,11 @@ export const Config: Schema<Config> = Schema.intersect([
     modelMappings: Schema.array(Schema.object({
       suffix: Schema.string().required().description('切换模型参数名'),
       modelId: Schema.string().required().description('模型ID'),
+      provider: Schema.union([
+        Schema.const('yunwu').description('云雾 (yunwu)'),
+        Schema.const('gptgod').description('GPT God'),
+        Schema.const('gemini').description('Google Gemini'),
+      ]).default('yunwu').description('供应商'),
       apiFormat: Schema.union([
         Schema.const('gemini').description('Gemini 原生'),
         Schema.const('openai').description('GPT Image'),
@@ -244,6 +282,7 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.union([
     Schema.object({
       enableVideoGeneration: Schema.const(true).required(),
+      videoProvider: Schema.const('yunwu').default('yunwu').description('视频生成供应商（目前仅支持云雾）'),
       videoApiKey: Schema.string()
         .role('secret')
         .required()
@@ -283,6 +322,7 @@ export const Config: Schema<Config> = Schema.intersect([
       ]).description('视频风格预设'),
     }),
     Schema.object({
+      videoProvider: Schema.const('yunwu').default('yunwu').hidden(),
       videoApiKey: Schema.string().role('secret').default('').hidden(),
       videoApiBase: Schema.string().default('https://yunwu.ai').hidden(),
       singleImageVideoModel: Schema.string().default('sora-2').hidden(),
@@ -339,7 +379,7 @@ export function apply(ctx: Context, config: Config) {
       try {
         // 传入单图和多图模型ID，由 Provider 根据图片数量选择
         videoProvider = createVideoProvider({
-          provider: 'yunwu',
+          provider: config.videoProvider || 'yunwu',
           yunwuApiKey: config.videoApiKey,
           yunwuVideoModelId: config.singleImageVideoModel,
           yunwuVideoApiBase: config.videoApiBase,
