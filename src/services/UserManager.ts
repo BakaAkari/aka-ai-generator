@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, promises as fs } from 'fs'
 import { join } from 'path'
-import { Config } from '../index'
+import type { Config } from '../shared/config'
 
 // 简单的异步锁实现
 class AsyncLock {
@@ -764,4 +764,3 @@ export class UserManager {
     return { shouldWarn, shouldDeduct, blockCount }
   }
 }
-

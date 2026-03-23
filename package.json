@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-aka-ai-generator",
   "description": "自用AI生成插件(GPTGod & Yunwu)",
-  "version": "0.11.8",
+  "version": "0.12.1",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -11,6 +11,7 @@
   "license": "MIT",
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
     "dev": "tsc --watch",
     "test:video-orchestrator": "npx -y tsx ./src/orchestrators/VideoOrchestrator.spec.ts",
     "test:utils": "npx -y tsx ./src/providers/utils.spec.ts",

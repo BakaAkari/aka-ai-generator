@@ -1,12 +1,5 @@
 import { Argv, h } from 'koishi'
-import { ModelMappingConfig } from '../index'
-
-interface StyleCommandModifiers {
-  modelMapping?: ModelMappingConfig
-  customAdditions?: string[]
-  resolution?: '1k' | '2k' | '4k'
-  aspectRatio?: '1:1' | '4:3' | '16:9' | '9:16' | '3:2' | '2:3'
-}
+import type { ImageGenerationModifiers, ModelMappingConfig } from '../shared/types'
 
 /**
  * 规范化后缀名称
@@ -36,7 +29,7 @@ export function parseStyleCommandModifiers(
   argv: Argv,
   imgParam: any,
   modelMappingIndex: Map<string, ModelMappingConfig>
-): StyleCommandModifiers {
+): ImageGenerationModifiers {
   // 优先从 session.content 解析原始文本，以支持被 Koishi 误吞的参数（如 -add, -4k）
   const session = argv.session
   let rawText = ''
@@ -66,7 +59,7 @@ export function parseStyleCommandModifiers(
 
   if (!argsList.length) return {}
 
-  const modifiers: StyleCommandModifiers = { customAdditions: [] }
+  const modifiers: ImageGenerationModifiers = { customAdditions: [] }
   const flagCandidates: string[] = []
 
   let index = 0
@@ -137,4 +130,3 @@ export function parseStyleCommandModifiers(
 
   return modifiers
 }
-
