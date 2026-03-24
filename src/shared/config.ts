@@ -10,14 +10,14 @@ import type {
 
 export interface Config {
   provider: ImageProvider
-  yunwuApiKey: string
-  yunwuModelId: string
+  yunwuApiKey?: string
+  yunwuModelId?: string
   yunwuApiFormat?: ApiFormat
-  gptgodApiKey: string
-  gptgodModelId: string
-  geminiApiKey: string
-  geminiModelId: string
-  geminiApiBase: string
+  gptgodApiKey?: string
+  gptgodModelId?: string
+  geminiApiKey?: string
+  geminiModelId?: string
+  geminiApiBase?: string
   modelMappings?: ModelMappingConfig[]
   apiTimeout: number
   defaultNumImages: number
@@ -53,51 +53,62 @@ const StyleItemSchema = Schema.object({
   prompt: Schema.string().role('textarea', { rows: 6 }).required().description('生成 prompt'),
 })
 
+const ProviderSchema = Schema.object({
+  provider: Schema.union([
+    Schema.const('yunwu').description('云雾'),
+    Schema.const('gptgod').description('GPT God'),
+    Schema.const('gemini').description('Google Gemini'),
+  ]).default('yunwu').description('图像生成供应商'),
+}).description('🎨 图像生成配置')
+
+const ProviderConfigSchema = Schema.union([
+  Schema.object({
+    provider: Schema.const('yunwu'),
+    yunwuApiKey: Schema.string().role('secret').required().description('云雾 API 密钥'),
+    yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
+    yunwuApiFormat: Schema.union([
+      Schema.const('gemini').description('Gemini 原生'),
+      Schema.const('openai').description('GPT Image'),
+    ]).default('gemini').description('接口格式'),
+    gptgodApiKey: Schema.string().role('secret').default('').hidden(),
+    gptgodModelId: Schema.string().default('').hidden(),
+    geminiApiKey: Schema.string().role('secret').default('').hidden(),
+    geminiModelId: Schema.string().default('').hidden(),
+    geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
+  }),
+  Schema.object({
+    provider: Schema.const('gptgod'),
+    gptgodApiKey: Schema.string().role('secret').required().description('GPT God API 密钥'),
+    gptgodModelId: Schema.string().default('').description('GPT God 模型ID'),
+    yunwuApiKey: Schema.string().role('secret').default('').hidden(),
+    yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
+    yunwuApiFormat: Schema.union([
+      Schema.const('gemini'),
+      Schema.const('openai'),
+    ]).default('gemini').hidden(),
+    geminiApiKey: Schema.string().role('secret').default('').hidden(),
+    geminiModelId: Schema.string().default('').hidden(),
+    geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
+  }),
+  Schema.object({
+    provider: Schema.const('gemini'),
+    geminiApiKey: Schema.string().role('secret').required().description('Google Gemini API 密钥'),
+    geminiModelId: Schema.string().default('gemini-2.5-flash-image').description('Gemini 模型ID'),
+    geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').description('Gemini API 地址'),
+    yunwuApiKey: Schema.string().role('secret').default('').hidden(),
+    yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
+    yunwuApiFormat: Schema.union([
+      Schema.const('gemini'),
+      Schema.const('openai'),
+    ]).default('gemini').hidden(),
+    gptgodApiKey: Schema.string().role('secret').default('').hidden(),
+    gptgodModelId: Schema.string().default('').hidden(),
+  }),
+])
+
 export const Config: Schema<Config> = Schema.intersect([
-  Schema.union([
-    Schema.object({
-      provider: Schema.const('yunwu').required().description('图像生成供应商'),
-      yunwuApiKey: Schema.string().role('secret').required().description('云雾 API 密钥'),
-      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').description('云雾图像生成模型ID'),
-      yunwuApiFormat: Schema.union([
-        Schema.const('gemini').description('Gemini 原生'),
-        Schema.const('openai').description('GPT Image'),
-      ]).default('gemini').description('接口格式'),
-      gptgodApiKey: Schema.string().role('secret').default('').hidden(),
-      gptgodModelId: Schema.string().default('').hidden(),
-      geminiApiKey: Schema.string().role('secret').default('').hidden(),
-      geminiModelId: Schema.string().default('').hidden(),
-      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
-    }),
-    Schema.object({
-      provider: Schema.const('gptgod').required().description('图像生成供应商'),
-      gptgodApiKey: Schema.string().role('secret').required().description('GPT God API 密钥'),
-      gptgodModelId: Schema.string().default('').description('GPT God 模型ID'),
-      yunwuApiKey: Schema.string().role('secret').default('').hidden(),
-      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
-      yunwuApiFormat: Schema.union([
-        Schema.const('gemini'),
-        Schema.const('openai'),
-      ]).default('gemini').hidden(),
-      geminiApiKey: Schema.string().role('secret').default('').hidden(),
-      geminiModelId: Schema.string().default('').hidden(),
-      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
-    }),
-    Schema.object({
-      provider: Schema.const('gemini').required().description('图像生成供应商'),
-      geminiApiKey: Schema.string().role('secret').required().description('Google Gemini API 密钥'),
-      geminiModelId: Schema.string().default('gemini-2.5-flash-image').description('Gemini 模型ID'),
-      geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').description('Gemini API 地址'),
-      yunwuApiKey: Schema.string().role('secret').default('').hidden(),
-      yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
-      yunwuApiFormat: Schema.union([
-        Schema.const('gemini'),
-        Schema.const('openai'),
-      ]).default('gemini').hidden(),
-      gptgodApiKey: Schema.string().role('secret').default('').hidden(),
-      gptgodModelId: Schema.string().default('').hidden(),
-    }),
-  ]).description('🎨 图像生成配置'),
+  ProviderSchema,
+  ProviderConfigSchema,
 
   Schema.object({
     apiTimeout: Schema.number().default(60).description('API请求超时时间（秒）'),
