@@ -211,7 +211,8 @@ export function apply(ctx: Context, config: PluginConfig) {
       : '云雾 Gemini 2.5 Flash Image'
   logger.info(`aka-ai-generator 插件已启动 (${providerLabel})`)
 
-  ctx.on('ready', async () => {
+  // 等待 chatluna 服务可用后再同步
+  ctx.inject(['chatluna'], async (ctx) => {
     await chatLunaBridge.sync(Boolean(config.chatlunaEnabled))
   })
 
@@ -223,7 +224,10 @@ export function apply(ctx: Context, config: PluginConfig) {
       aiGenerator.updateConfig(nextConfig)
       usageReporter.updateConfig(nextConfig)
       chatLunaBridge.updateConfig(nextConfig)
-      void chatLunaBridge.sync(Boolean(nextConfig.chatlunaEnabled))
+      // 只在 chatluna 服务可用时同步
+      if ((ctx as Context & { chatluna?: unknown }).chatluna) {
+        void chatLunaBridge.sync(Boolean(nextConfig.chatlunaEnabled))
+      }
     },
     { immediate: true },
   )
