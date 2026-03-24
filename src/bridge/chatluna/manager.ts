@@ -6,6 +6,7 @@ import { registerChatLunaTools } from './tools'
 import type { AiGeneratorService } from '../../service/AiGeneratorService'
 import type { Config } from '../../shared/config'
 import { CHATLUNA_BRIDGE_PLATFORM_NAME } from '../../shared/constants'
+import { AI_GENERATOR_TOOL_DEFINITIONS } from '../../shared/chatluna-tool-definitions'
 
 export class ChatLunaBridgeManager {
   private chatLunaPlugin?: ChatLunaPluginLike
@@ -83,7 +84,9 @@ export class ChatLunaBridgeManager {
     }
 
     const plugin = new runtime.ChatLunaPlugin(this.ctx, {}, CHATLUNA_BRIDGE_PLATFORM_NAME, false)
-    registerChatLunaTools(plugin, runtime.StructuredTool, this.aiGenerator, this.getConfig)
+    // 获取所有风格（包括 styles 和 styleGroups）
+    const allStyles = this.aiGenerator.listStylePresets()
+    registerChatLunaTools(plugin, runtime.StructuredTool, this.aiGenerator, this.getConfig, allStyles)
 
     if (!chatlunaService.getPlugin?.(CHATLUNA_BRIDGE_PLATFORM_NAME)) {
       await Promise.resolve(chatlunaService.installPlugin(plugin))
@@ -91,7 +94,7 @@ export class ChatLunaBridgeManager {
 
     this.chatLunaPlugin = plugin
     this.warnedUnavailable = false
-    this.logger.info('ChatLuna bridge enabled with image tools.')
+    this.logger.info(`ChatLuna bridge enabled with ${AI_GENERATOR_TOOL_DEFINITIONS.length} base tools and ${allStyles.length} style preset tools.`)    
   }
 
   private async disable() {

@@ -1,7 +1,7 @@
 import { h } from 'koishi'
 import { AI_GENERATOR_TOOL_DEFINITIONS } from '../../shared/chatluna-tool-definitions'
 import type { AiGeneratorService } from '../../service/AiGeneratorService'
-import type { ImageRequestContext } from '../../shared/types'
+import type { ImageRequestContext, StyleConfig } from '../../shared/types'
 import type { StructuredToolConstructor } from './runtime'
 import type { ChatLunaConfigAccessor, ChatLunaSessionLike } from './types'
 
@@ -350,4 +350,129 @@ async function withImageTaskLock(
   } finally {
     aiGenerator.userManager.endTask(userId)
   }
+}
+
+// 为用户配置的 style 创建独立的 ChatLuna 工具实例
+export function createStylePresetToolInstance(
+  StructuredTool: StructuredToolConstructor,
+  style: StyleConfig,
+  aiGenerator: AiGeneratorService,
+  getConfig: ChatLunaConfigAccessor,
+) {
+  const toolName = `aigc_style_${sanitizeToolName(style.commandName)}`
+  const description = style.description || `Apply ${style.commandName} style to image generation`
+
+  return new class extends StructuredTool {
+    name = toolName
+    description = [
+      description,
+      `Usage: Use this when the user wants to apply the "${style.commandName}" style to generate or edit images.`,
+      `Risk: low`,
+      `Input JSON schema: {"type":"object","properties":{"promptAdditions":{"type":"string","description":"Optional extra prompt details."},"referenceMode":{"type":"string","enum":["none","current_message","quoted_message","explicit","last_generated"],"description":"Where to load reference images from."},"imageUrls":{"type":"array","items":{"type":"string"},"description":"Explicit image URLs when referenceMode is explicit."},"numImages":{"type":"number","minimum":1,"maximum":4},"aspectRatio":{"type":"string","enum":["1:1","4:3","16:9","9:16","3:2","2:3"]},"resolution":{"type":"string","enum":["1k","2k","4k"]},"modelSuffix":{"type":"string"}},"additionalProperties":false}`,
+    ].join('\n')
+    schema = {
+      type: 'object',
+      properties: {
+        promptAdditions: { type: 'string', description: 'Optional extra prompt details.' },
+        referenceMode: {
+          type: 'string',
+          enum: ['none', 'current_message', 'quoted_message', 'explicit', 'last_generated'],
+          description: 'Where to load reference images from.',
+        },
+        imageUrls: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Explicit image URLs when referenceMode is explicit.',
+        },
+        numImages: { type: 'number', minimum: 1, maximum: 4 },
+        aspectRatio: { type: 'string', enum: ['1:1', '4:3', '16:9', '9:16', '3:2', '2:3'] },
+        resolution: { type: 'string', enum: ['1k', '2k', '4k'] },
+        modelSuffix: { type: 'string', description: 'Optional configured model suffix.' },
+      },
+      additionalProperties: false,
+    }
+
+    constructor() {
+      super({ verboseParsingErrors: true })
+    }
+
+    async _call(
+      input: Record<string, unknown>,
+      _runManager?: unknown,
+      runtimeConfig?: { configurable?: { session?: ChatLunaSessionLike } },
+    ) {
+      const session = runtimeConfig?.configurable?.session
+      if (!session?.userId) {
+        return formatToolError('会话无效，无法识别用户。')
+      }
+
+      try {
+        return await runDynamicStyleTool(input, session, style, aiGenerator, getConfig)
+      } catch (error) {
+        return formatToolError(error instanceof Error ? error.message : String(error))
+      }
+    }
+  }()
+}
+
+async function runDynamicStyleTool(
+  input: Record<string, unknown>,
+  session: ChatLunaSessionLike,
+  style: StyleConfig,
+  aiGenerator: AiGeneratorService,
+  getConfig: ChatLunaConfigAccessor,
+) {
+  return withImageTaskLock(session, aiGenerator, async () => {
+    const promptAdditions = typeof input.promptAdditions === 'string' ? input.promptAdditions.trim() : ''
+    const prompt = [style.prompt, promptAdditions].filter(Boolean).join(' - ')
+    const referenceMode = typeof input.referenceMode === 'string' ? input.referenceMode : 'none'
+    const imageUrls = referenceMode === 'none'
+      ? []
+      : resolveReferenceImages(referenceMode, input, session, aiGenerator)
+
+    if (referenceMode !== 'none' && !imageUrls.length) {
+      return formatToolError('未能解析到参考图片。')
+    }
+
+    const config = getConfig()
+    const requestContext = buildRequestContext(input, config)
+    const numImages = requestContext.numImages || config.defaultNumImages
+
+    const limitCheck = await aiGenerator.checkAndReserveQuota(
+      session.userId!,
+      session.username || session.userId!,
+      numImages,
+      session.platform,
+    )
+    if (!limitCheck.allowed) {
+      return formatToolError(limitCheck.message || '额度不足。')
+    }
+
+    const images = await aiGenerator.requestProviderImages(prompt, imageUrls, numImages, requestContext)
+    await sendGeneratedImages(session, images)
+    aiGenerator.rememberGeneratedImages({
+      session: session as any,
+      imageUrls: images,
+      prompt,
+      requestContext,
+      stylePreset: style.commandName,
+    })
+    const usage = await aiGenerator.recordUsage(
+      session.userId!,
+      session.username || session.userId!,
+      style.commandName,
+      images.length,
+      session.platform,
+    )
+
+    return formatToolJson({ ok: true, stylePreset: style.commandName, imagesCount: images.length, images, usage })
+  })
+}
+
+function sanitizeToolName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9_\u4e00-\u9fff]/g, '_')
+    .replace(/_{2,}/g, '_')
+    .replace(/^_|_$/g, '')
 }
