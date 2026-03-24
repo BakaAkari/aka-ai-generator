@@ -1,7 +1,7 @@
 import { h } from 'koishi'
 import { AI_GENERATOR_TOOL_DEFINITIONS } from '../../shared/chatluna-tool-definitions'
 import type { AiGeneratorService } from '../../service/AiGeneratorService'
-import type { ImageRequestContext, StyleConfig } from '../../shared/types'
+import type { ImageRequestContext, StyleConfig, StyleMatchCandidate } from '../../shared/types'
 import type { StructuredToolConstructor } from './runtime'
 import type { ChatLunaConfigAccessor, ChatLunaSessionLike } from './types'
 
@@ -54,6 +54,11 @@ export function createChatLunaToolInstance(
                 commandName: style.commandName,
                 description: style.description || '',
                 groupName: style.groupName || '',
+                aliases: style.aliases || [],
+                keywords: style.keywords || [],
+                examples: style.examples || [],
+                category: style.category || '',
+                whenToUse: style.whenToUse || '',
               })),
             })
           default:
@@ -170,11 +175,11 @@ async function runStylePresetTool(
   getConfig: ChatLunaConfigAccessor,
 ) {
   return withImageTaskLock(session, aiGenerator, async () => {
-    const stylePreset = expectString(input.stylePreset, 'stylePreset')
-    const preset = aiGenerator.getStylePreset(stylePreset)
-    if (!preset) {
-      return formatToolError(`未找到风格预设：${stylePreset}`)
+    const resolvedStyle = resolveRequestedStylePreset(input, aiGenerator)
+    if ('error' in resolvedStyle) {
+      return formatToolError(resolvedStyle.error)
     }
+    const { preset, matches } = resolvedStyle
 
     const promptAdditions = typeof input.promptAdditions === 'string' ? input.promptAdditions.trim() : ''
     const prompt = [preset.prompt, promptAdditions].filter(Boolean).join(' - ')
@@ -218,8 +223,45 @@ async function runStylePresetTool(
       session.platform,
     )
 
-    return formatToolJson({ ok: true, stylePreset: preset.commandName, imagesCount: images.length, images, usage })
+    return formatToolJson({
+      ok: true,
+      stylePreset: preset.commandName,
+      imagesCount: images.length,
+      images,
+      usage,
+      styleMatches: matches.map(item => ({
+        commandName: item.style.commandName,
+        score: item.score,
+        matchedTerms: item.matchedTerms,
+      })),
+    })
   })
+}
+
+function resolveRequestedStylePreset(
+  input: Record<string, unknown>,
+  aiGenerator: AiGeneratorService,
+): { preset: StyleConfig, matches: StyleMatchCandidate[] } | { error: string } {
+  const explicitStylePreset = typeof input.stylePreset === 'string' ? input.stylePreset.trim() : ''
+  if (explicitStylePreset) {
+    const preset = aiGenerator.getStylePreset(explicitStylePreset)
+    if (!preset) {
+      return { error: `未找到风格预设：${explicitStylePreset}` }
+    }
+    return { preset, matches: [{ style: preset, score: 999, matchedTerms: [explicitStylePreset] }] }
+  }
+
+  const styleQuery = typeof input.styleQuery === 'string' ? input.styleQuery.trim() : ''
+  if (!styleQuery) {
+    return { error: 'stylePreset 或 styleQuery 至少需要提供一个。' }
+  }
+
+  const matches = aiGenerator.matchStylePresets(styleQuery, 3)
+  if (!matches.length) {
+    return { error: `未找到与“${styleQuery}”匹配的风格预设。` }
+  }
+
+  return { preset: matches[0].style, matches }
 }
 
 function buildRequestContext(
@@ -361,11 +403,19 @@ export function createStylePresetToolInstance(
 ) {
   const toolName = `aigc_style_${sanitizeToolName(style.commandName)}`
   const description = style.description || `Apply ${style.commandName} style to image generation`
+  const metadataLines = [
+    style.category ? `Category: ${style.category}` : '',
+    style.whenToUse ? `When to use: ${style.whenToUse}` : '',
+    style.aliases?.length ? `Aliases: ${style.aliases.join(', ')}` : '',
+    style.keywords?.length ? `Keywords: ${style.keywords.join(', ')}` : '',
+    style.examples?.length ? `Examples: ${style.examples.join(' | ')}` : '',
+  ].filter(Boolean)
 
   return new class extends StructuredTool {
     name = toolName
     description = [
       description,
+      ...metadataLines,
       `Usage: Use this when the user wants to apply the "${style.commandName}" style to generate or edit images.`,
       `Risk: low`,
       `Input JSON schema: {"type":"object","properties":{"promptAdditions":{"type":"string","description":"Optional extra prompt details."},"referenceMode":{"type":"string","enum":["none","current_message","quoted_message","explicit","last_generated"],"description":"Where to load reference images from."},"imageUrls":{"type":"array","items":{"type":"string"},"description":"Explicit image URLs when referenceMode is explicit."},"numImages":{"type":"number","minimum":1,"maximum":4},"aspectRatio":{"type":"string","enum":["1:1","4:3","16:9","9:16","3:2","2:3"]},"resolution":{"type":"string","enum":["1k","2k","4k"]},"modelSuffix":{"type":"string"}},"additionalProperties":false}`,

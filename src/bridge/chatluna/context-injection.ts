@@ -31,41 +31,67 @@ export function installChatLunaContextInjection(
     if (!message) return
 
     const text = getMessageText(message) || getSessionText(session)
-    if (!text || hasAiGeneratorContextBlock(text) || !looksLikeImageFollowUp(text)) return
+    if (!text || hasAnyAiGeneratorContextBlock(text)) return
 
     const conversationId = extractConversationId(conversationArg, promptVariables, session, aiGenerator)
-    if (!conversationId) return
+    const styleMatches = aiGenerator.matchStylePresets(text, 3)
+    const shouldInjectStyleCandidates = styleMatches.length > 0
+    const shouldInjectImageContext = looksLikeImageFollowUp(text) && Boolean(conversationId)
 
-    const context = aiGenerator.getConversationImageContext(conversationId)
+    if (!shouldInjectStyleCandidates && !shouldInjectImageContext) return
+
+    const context = conversationId ? aiGenerator.getConversationImageContext(conversationId) : undefined
     const lastGenerated = context?.lastGenerated
-    if (!lastGenerated) return
+    const blocks: string[] = []
 
-    const contextBlock = [
-      '[AIGC_CONTEXT]',
-      `conversationId: ${conversationId}`,
-      'lastGeneratedImage: available',
-      `lastPrompt: ${lastGenerated.prompt}`,
-      `stylePreset: ${lastGenerated.stylePreset || 'none'}`,
-      'instruction: If the user asks to continue or modify the previous image, prefer aigc_edit_image with referenceMode=last_generated.',
-      '[/AIGC_CONTEXT]',
-    ].join('\n')
+    if (shouldInjectImageContext && conversationId && lastGenerated) {
+      blocks.push([
+        '[AIGC_CONTEXT]',
+        `conversationId: ${conversationId}`,
+        'lastGeneratedImage: available',
+        `lastPrompt: ${lastGenerated.prompt}`,
+        `stylePreset: ${lastGenerated.stylePreset || 'none'}`,
+        'instruction: If the user asks to continue or modify the previous image, prefer aigc_edit_image with referenceMode=last_generated.',
+        '[/AIGC_CONTEXT]',
+      ].join('\n'))
+    }
 
-    const nextContent = prependContextBlockToMessage(text, contextBlock)
-    setAugmentedMessageContent(message, message.content, contextBlock, nextContent)
+    if (shouldInjectStyleCandidates) {
+      blocks.push(formatStyleCandidatesBlock(styleMatches))
+    }
+
+    if (!blocks.length) return
+
+    const combinedBlock = blocks.join('\n\n')
+    const nextContent = prependContextBlockToMessage(text, combinedBlock)
+    setAugmentedMessageContent(message, message.content, combinedBlock, nextContent)
 
     if (session) {
       session.content = text
     }
 
     if (promptVariables) {
-      promptVariables.aiGeneratorContext = contextBlock
+      promptVariables.aiGeneratorContext = combinedBlock
       promptVariables.aiGeneratorContextData = context
+      promptVariables.aiGeneratorStyleCandidates = styleMatches.map(item => ({
+        commandName: item.style.commandName,
+        description: item.style.description || '',
+        aliases: item.style.aliases || [],
+        keywords: item.style.keywords || [],
+        category: item.style.category || '',
+        whenToUse: item.style.whenToUse || '',
+        score: item.score,
+        matchedTerms: item.matchedTerms,
+      }))
+      promptVariables.aiGeneratorPreferredStylePreset = styleMatches[0]?.style.commandName || ''
       promptVariables.input = nextContent
       promptVariables.userInput = text
-      promptVariables.aiGeneratorReferenceRecommendation = 'last_generated'
+      if (shouldInjectImageContext && lastGenerated) {
+        promptVariables.aiGeneratorReferenceRecommendation = 'last_generated'
+      }
     }
 
-    logger.debug('aigc context injected for conversationId=%s', conversationId)
+    logger.debug('aigc context injected for conversationId=%s with %s style candidates', conversationId || 'n/a', styleMatches.length)
   })
 
   const disposeClearHistory = (ctx as Context & {
@@ -231,6 +257,23 @@ function prependContextBlockToMessage(text: string, contextBlock: string) {
   return `${contextBlock}\n\n${text}`
 }
 
-function hasAiGeneratorContextBlock(text: string) {
-  return text.includes('[AIGC_CONTEXT]')
+function hasAnyAiGeneratorContextBlock(text: string) {
+  return text.includes('[AIGC_CONTEXT]') || text.includes('[AIGC_STYLE_CANDIDATES]')
+}
+
+function formatStyleCandidatesBlock(
+  matches: ReturnType<AiGeneratorService['matchStylePresets']>,
+) {
+  const lines = ['[AIGC_STYLE_CANDIDATES]']
+  for (const [index, item] of matches.entries()) {
+    lines.push(`${index + 1}. ${item.style.commandName}`)
+    if (item.style.description) lines.push(`description: ${item.style.description}`)
+    if (item.style.aliases?.length) lines.push(`aliases: ${item.style.aliases.join(', ')}`)
+    if (item.style.keywords?.length) lines.push(`keywords: ${item.style.keywords.join(', ')}`)
+    if (item.style.whenToUse) lines.push(`whenToUse: ${item.style.whenToUse}`)
+    if (item.matchedTerms.length) lines.push(`matchedTerms: ${item.matchedTerms.join(', ')}`)
+  }
+  lines.push('instruction: If the user seems to reference one of these configured styles, prefer aigc_apply_style_preset and pass stylePreset exactly, or pass styleQuery when uncertain.')
+  lines.push('[/AIGC_STYLE_CANDIDATES]')
+  return lines.join('\n')
 }

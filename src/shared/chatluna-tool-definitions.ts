@@ -62,6 +62,7 @@ export const AI_GENERATOR_TOOL_DEFINITIONS: AiGeneratorToolDefinition[] = [
       type: 'object',
       properties: {
         stylePreset: { type: 'string', description: 'Configured style command name.' },
+        styleQuery: { type: 'string', description: 'Natural-language style lookup query when the exact preset name is unknown.' },
         promptAdditions: { type: 'string', description: 'Optional extra prompt details.' },
         referenceMode: {
           type: 'string',
@@ -78,7 +79,10 @@ export const AI_GENERATOR_TOOL_DEFINITIONS: AiGeneratorToolDefinition[] = [
         resolution: { type: 'string', enum: ['1k', '2k', '4k'] },
         modelSuffix: { type: 'string', description: 'Optional configured model suffix.' },
       },
-      required: ['stylePreset'],
+      anyOf: [
+        { required: ['stylePreset'] },
+        { required: ['styleQuery'] },
+      ],
       additionalProperties: false,
     },
   },

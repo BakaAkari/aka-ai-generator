@@ -21,6 +21,11 @@ export interface StyleConfig {
   commandName: string
   description?: string
   prompt: string
+  aliases?: string[]
+  keywords?: string[]
+  examples?: string[]
+  category?: string
+  whenToUse?: string
 }
 
 export interface StyleGroupConfig {
@@ -36,6 +41,12 @@ export interface VideoStyleConfig {
 
 export interface ResolvedStyleConfig extends StyleConfig {
   groupName?: string
+}
+
+export interface StyleMatchCandidate {
+  style: ResolvedStyleConfig
+  score: number
+  matchedTerms: string[]
 }
 
 export interface ImageRequestContext {

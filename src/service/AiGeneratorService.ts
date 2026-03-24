@@ -9,6 +9,7 @@ import type {
   ImageGenerationModifiers,
   ImageRequestContext,
   ResolvedStyleConfig,
+  StyleMatchCandidate,
   StyleConfig,
 } from '../shared/types'
 import { PLUGIN_NAME } from '../shared/constants'
@@ -224,7 +225,82 @@ export class AiGeneratorService extends Service {
 
   getStylePreset(commandName: string) {
     const normalized = commandName.trim().toLowerCase()
-    return this.styleDefinitions.find(style => style.commandName.trim().toLowerCase() === normalized)
+    return this.styleDefinitions.find((style) => {
+      if (style.commandName.trim().toLowerCase() === normalized) return true
+      return Array.isArray(style.aliases) && style.aliases.some(alias => alias.trim().toLowerCase() === normalized)
+    })
+  }
+
+  matchStylePresets(query: string, limit: number = 3): StyleMatchCandidate[] {
+    const normalizedQuery = normalizeMatchText(query)
+    if (!normalizedQuery) return []
+
+    const queryTerms = buildQueryTerms(query)
+    const candidates: StyleMatchCandidate[] = []
+
+    for (const style of this.styleDefinitions) {
+      const matchedTerms = new Set<string>()
+      let score = 0
+
+      const addMatches = (value: string | undefined, weight: number) => {
+        const normalizedValue = normalizeMatchText(value)
+        if (!normalizedValue) return
+
+        if (normalizedValue === normalizedQuery) {
+          score += weight * 3
+          matchedTerms.add(value!.trim())
+          return
+        }
+
+        if (normalizedValue.includes(normalizedQuery) || normalizedQuery.includes(normalizedValue)) {
+          score += weight * 2
+          matchedTerms.add(value!.trim())
+        }
+
+        for (const term of queryTerms) {
+          if (term.length < 2) continue
+          if (normalizedValue.includes(term)) {
+            score += weight
+            matchedTerms.add(term)
+          }
+        }
+      }
+
+      addMatches(style.commandName, 10)
+      addMatches(style.description, 5)
+      addMatches(style.category, 5)
+      addMatches(style.whenToUse, 4)
+
+      for (const alias of style.aliases || []) addMatches(alias, 9)
+      for (const keyword of style.keywords || []) addMatches(keyword, 8)
+      for (const example of style.examples || []) addMatches(example, 6)
+
+      if (!score && style.prompt) {
+        const promptText = normalizeMatchText(style.prompt)
+        for (const term of queryTerms) {
+          if (term.length < 2) continue
+          if (promptText.includes(term)) {
+            score += 1
+            matchedTerms.add(term)
+          }
+        }
+      }
+
+      if (score > 0) {
+        candidates.push({
+          style,
+          score,
+          matchedTerms: Array.from(matchedTerms).slice(0, 6),
+        })
+      }
+    }
+
+    return candidates
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score
+        return a.style.commandName.localeCompare(b.style.commandName, 'zh-CN')
+      })
+      .slice(0, limit)
   }
 
   getQuotaSummary(userId: string, userName: string) {
@@ -344,4 +420,31 @@ export class AiGeneratorService extends Service {
 
     return Array.from(unique.values())
   }
+}
+
+function normalizeMatchText(value?: string | null) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+}
+
+function buildQueryTerms(query: string) {
+  const raw = String(query || '')
+    .toLowerCase()
+    .trim()
+
+  const compact = raw.replace(/\s+/g, '')
+  const splitTerms = raw
+    .split(/[\s,，。；;、|/]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+
+  const unique = new Set<string>()
+  if (compact) unique.add(compact)
+  for (const term of splitTerms) {
+    unique.add(term.replace(/\s+/g, ''))
+  }
+
+  return Array.from(unique)
 }
