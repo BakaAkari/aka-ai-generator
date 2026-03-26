@@ -259,6 +259,8 @@ export function createImageGenerationHandlers(params: CreateImageGenerationHandl
 
     const generatedImages: string[] = []
     let creditDeducted = false
+    let sentCount = 0
+    let sendFailedCount = 0
 
     const onImageGenerated = async (imageUrl: string, index: number, total: number) => {
       if (verboseLogs) {
@@ -297,10 +299,12 @@ export function createImageGenerationHandlers(params: CreateImageGenerationHandl
 
       try {
         await session.send(h.image(imageUrl))
+        sentCount++
         if (verboseLogs) {
           logger.info('流式处理：图片已发送', { index: index + 1, total, userId })
         }
       } catch (sendError) {
+        sendFailedCount++
         logger.error('发送图片失败', {
           userId,
           error: sanitizeError(sendError),
@@ -352,7 +356,44 @@ export function createImageGenerationHandlers(params: CreateImageGenerationHandl
       })
     }
 
-    const images = await requestProviderImages(finalPrompt, imageUrlsInput, imageCount, requestContext, onImageGenerated)
+    let images: string[]
+    try {
+      images = await requestProviderImages(finalPrompt, imageUrlsInput, imageCount, requestContext, onImageGenerated)
+    } catch (providerError) {
+      // Provider threw because the onImageGenerated callback (image send) failed.
+      // Some images may have been generated but not delivered to the user.
+      logger.error('requestProviderImages 异常', {
+        userId,
+        error: sanitizeError(providerError),
+        generatedCount: generatedImages.length,
+        sentCount,
+        sendFailedCount,
+      })
+
+      if (generatedImages.length > 0 && sentCount > 0) {
+        // Some images were sent successfully before the failure
+        aiGenerator.rememberGeneratedImages({
+          session,
+          imageUrls: generatedImages,
+          prompt: finalPrompt,
+          requestContext,
+          stylePreset: styleName,
+        })
+        if (!creditDeducted) {
+          await onRecordUserUsage(session, styleName, sentCount, false)
+        }
+        await session.send(`图像处理部分完成：${sentCount}张发送成功，${sendFailedCount}张发送失败`)
+        return ''
+      }
+
+      // No images were sent at all
+      if (generatedImages.length > 0) {
+        await session.send('图片已生成但发送失败，请稍后重试')
+        return ''
+      }
+
+      throw providerError
+    }
 
     if (verboseLogs) {
       logger.info('requestProviderImages 返回', {

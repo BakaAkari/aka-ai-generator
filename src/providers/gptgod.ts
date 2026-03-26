@@ -450,13 +450,13 @@ export class GptGodProvider implements ImageProvider {
               })
               try {
                 await onImageGenerated(imageUrl, currentIndex, numImages)
-                logger.info('图片生成回调函数执行成功 (GPTGod)', { 
-                  currentIndex, 
+                logger.info('图片生成回调函数执行成功 (GPTGod)', {
+                  currentIndex,
                   total: numImages,
                   imageUrlLength: imageUrl?.length || 0
                 })
               } catch (callbackError) {
-                logger.error('图片生成回调函数执行失败 (GPTGod)', { 
+                logger.error('图片生成回调函数执行失败 (GPTGod)', {
                   error: sanitizeError(callbackError),
                   errorMessage: callbackError?.message,
                   errorStack: callbackError?.stack,
@@ -464,7 +464,7 @@ export class GptGodProvider implements ImageProvider {
                   total: numImages,
                   imageUrlLength: imageUrl?.length || 0
                 })
-                // 回调失败不影响继续生成
+                throw callbackError
               }
             } else {
               logger.warn('图片生成回调函数未提供，跳过流式发送 (GPTGod)', { 

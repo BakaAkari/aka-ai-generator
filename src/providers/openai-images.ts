@@ -234,6 +234,7 @@ export class OpenAIImagesProvider implements ImageProvider {
                 currentIndex,
                 total: numImages
               })
+              throw callbackError
             }
           }
         }
@@ -376,6 +377,7 @@ export class OpenAIImagesProvider implements ImageProvider {
                 currentIndex,
                 total: numImages
               })
+              throw callbackError
             }
           }
         }

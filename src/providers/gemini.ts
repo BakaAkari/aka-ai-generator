@@ -424,7 +424,7 @@ export class GeminiProvider implements ImageProvider {
                   total: numImages,
                   imageUrlLength: imageUrl?.length || 0
                 })
-                // 回调失败不影响继续生成
+                throw callbackError
               }
             } else {
               logger.warn('图片生成回调函数未提供，跳过流式发送', {
