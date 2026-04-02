@@ -141,6 +141,7 @@ export class OpenAIImagesProvider implements ImageProvider {
    */
   /**
    * 根据宽高比获取 size 参数
+   * 注意：GPT Image API 只支持固定尺寸，不支持动态分辨率 (1k/2k/4k)
    */
   private getSizeFromAspectRatio(aspectRatio?: string): string {
     // GPT Image 支持的尺寸
@@ -155,6 +156,27 @@ export class OpenAIImagesProvider implements ImageProvider {
     return sizeMap[aspectRatio || '1:1'] || '1024x1024'
   }
 
+  /**
+   * 检查是否是自定义分辨率格式 (如 1024x2048)
+   */
+  private isCustomResolution(resolution?: string): boolean {
+    if (!resolution) return false
+    return /^\d+x\d+$/.test(resolution)
+  }
+
+  /**
+   * 获取最终的 size 参数
+   * 优先级：自定义分辨率 > 宽高比映射
+   */
+  private getSize(options?: ImageGenerationOptions): string {
+    // 如果是自定义分辨率格式 (如 1024x2048)，直接使用
+    if (options?.resolution && this.isCustomResolution(options.resolution)) {
+      return options.resolution
+    }
+    // 否则根据宽高比映射
+    return this.getSizeFromAspectRatio(options?.aspectRatio)
+  }
+
   private async createImages(
     prompt: string,
     numImages: number,
@@ -166,13 +188,21 @@ export class OpenAIImagesProvider implements ImageProvider {
 
     const allImages: string[] = []
     
-    // 根据宽高比确定 size
-    const size = this.getSizeFromAspectRatio(options?.aspectRatio)
+    // 获取 size 参数 (优先使用自定义分辨率)
+    const size = this.getSize(options)
+    
+    // 提示用户：1k/2k/4k 预设分辨率不被 OpenAI Images API 支持
+    if (options?.resolution && ['1k', '2k', '4k'].includes(options.resolution)) {
+      logger?.info('当前模型不支持 1k/2k/4k 预设分辨率，已忽略', { 
+        resolution: options.resolution,
+        note: '请使用 Gemini 模型以获得预设分辨率控制，或使用自定义尺寸如 1024x2048'
+      })
+    }
     
     logger?.debug('OpenAI Images 生成参数', { 
       size, 
       aspectRatio: options?.aspectRatio,
-      resolution: options?.resolution 
+      resolution: options?.resolution
     })
 
     // 每次调用生成一张图片，循环调用
@@ -281,11 +311,11 @@ export class OpenAIImagesProvider implements ImageProvider {
 
     const allImages: string[] = []
     
-    // 根据宽高比确定 size
-    const size = this.getSizeFromAspectRatio(options?.aspectRatio)
+    // 获取 size 参数 (优先使用自定义分辨率)
+    const size = this.getSize(options)
 
     // 下载所有输入图片
-    logger.debug('下载输入图片用于编辑', { imageCount: imageUrls.length, size })
+    logger.debug('下载输入图片用于编辑', { imageCount: imageUrls.length, size, resolution: options?.resolution })
     const imageBlobs: Blob[] = []
     
     for (const url of imageUrls) {

@@ -103,14 +103,23 @@ export function parseStyleCommandModifiers(
   const validResolutions = ['1k', '2k', '4k']
   const validAspectRatios = ['1:1', '4:3', '16:9', '9:16', '3:2', '2:3']
   
+  // 正则表达式匹配自定义分辨率格式: 数字x数字 (如 1024x2048, 960x960)
+  const customResolutionRegex = /^\d+x\d+$/
+  
   for (const arg of flagCandidates) {
     if (!arg.startsWith('-')) continue
     const key = normalizeSuffix(arg)
     if (!key) continue
     
-    // 检查是否是分辨率参数 (-1k, -2k, -4k)
+    // 检查是否是预设分辨率参数 (-1k, -2k, -4k)
     if (validResolutions.includes(key)) {
       modifiers.resolution = key as '1k' | '2k' | '4k'
+      continue
+    }
+    
+    // 检查是否是自定义分辨率格式 (-1024x2048, -960x960 等)
+    if (customResolutionRegex.test(key)) {
+      modifiers.resolution = key as `${number}x${number}`
       continue
     }
     

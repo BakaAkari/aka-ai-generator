@@ -1,6 +1,7 @@
 // 图像生成选项
+// resolution 支持预设值 (1k/2k/4k) 或自定义尺寸 (如 '1024x2048', '960x960')
 export interface ImageGenerationOptions {
-  resolution?: '1k' | '2k' | '4k'
+  resolution?: '1k' | '2k' | '4k' | `${number}x${number}`
   aspectRatio?: '1:1' | '4:3' | '16:9' | '9:16' | '3:2' | '2:3'
 }
 

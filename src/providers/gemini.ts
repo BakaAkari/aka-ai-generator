@@ -312,11 +312,37 @@ export class GeminiProvider implements ImageProvider {
       responseModalities: ["IMAGE"]
     }
     
-    // 如果指定了宽高比，添加 imageConfig
+    // 构建 imageConfig
+    const imageConfig: any = {}
+    
+    // 如果指定了宽高比
     if (options?.aspectRatio) {
-      generationConfig.imageConfig = {
-        aspectRatio: options.aspectRatio
+      imageConfig.aspectRatio = options.aspectRatio
+    }
+    
+    // 如果指定了分辨率，映射到 imageSize
+    // 支持的分辨率: 1k(低质量), 2k(中质量), 4k(高质量/4K)
+    if (options?.resolution) {
+      const resolutionMap: Record<string, string> = {
+        '1k': 'LOW',
+        '2k': 'MEDIUM',
+        '4k': '4K'
       }
+      const imageSize = resolutionMap[options.resolution]
+      if (imageSize) {
+        imageConfig.imageSize = imageSize
+      } else if (/^\d+x\d+$/.test(options.resolution)) {
+        // 自定义分辨率格式 (如 1024x2048) 不被 Gemini 支持
+        logger?.info('Gemini 不支持自定义像素尺寸，请使用 -1k/-2k/-4k 预设分辨率', {
+          customResolution: options.resolution,
+          supportedResolutions: ['1k (LOW)', '2k (MEDIUM)', '4k (4K)']
+        })
+      }
+    }
+    
+    // 如果有任何 imageConfig 配置，添加到 generationConfig
+    if (Object.keys(imageConfig).length > 0) {
+      generationConfig.imageConfig = imageConfig
     }
 
     for (let i = 0; i < numImages; i++) {
@@ -346,7 +372,9 @@ export class GeminiProvider implements ImageProvider {
         numImages, 
         current: i + 1, 
         endpoint,
-        aspectRatio: options?.aspectRatio 
+        aspectRatio: options?.aspectRatio,
+        resolution: options?.resolution,
+        imageSize: generationConfig.imageConfig?.imageSize
       })
 
       try {

@@ -16,6 +16,7 @@ export const COMMANDS = {
   RECHARGE_ALL: '活动充值',
   RECHARGE_HISTORY: '图像充值记录',
   IMAGE_COMMANDS: '图像指令',
+  IMAGE_PARAMS: '参数指令',
   VIDEO_COMMANDS: '视频指令',
   SINGLE_IMG_VIDEO: '单图生视频',
   MULTI_IMG_VIDEO: '多图生视频',

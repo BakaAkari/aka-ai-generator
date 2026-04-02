@@ -1,6 +1,7 @@
 import type { Context, Session } from 'koishi'
 import {
   buildImageCommandsList,
+  buildImageParamsHelp,
   buildVideoCommandsList,
   type CommandRegistry,
 } from './catalog'
@@ -56,7 +57,14 @@ export function registerManagementCommands(params: RegisterManagementCommandsPar
   ctx.command(COMMANDS.IMAGE_COMMANDS, '查看图像生成指令列表')
     .action(async ({ session }) => {
       if (!session?.userId) return '会话无效'
-      return buildImageCommandsList(config, commandRegistry, getConfiguredPrefix())
+      // 不显示完整参数说明，而是提示用户使用参数指令
+      return buildImageCommandsList(config, commandRegistry, getConfiguredPrefix(), false)
+    })
+
+  ctx.command(COMMANDS.IMAGE_PARAMS, '查看图像参数说明')
+    .action(async ({ session }) => {
+      if (!session?.userId) return '会话无效'
+      return buildImageParamsHelp(config, getConfiguredPrefix())
     })
 
   ctx.command(COMMANDS.VIDEO_COMMANDS, '查看视频生成指令列表')

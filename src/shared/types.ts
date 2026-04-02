@@ -13,7 +13,8 @@ export interface ModelMappingConfig {
 export interface ImageGenerationModifiers {
   modelMapping?: ModelMappingConfig
   customAdditions?: string[]
-  resolution?: '1k' | '2k' | '4k'
+  // resolution 支持预设值 (1k/2k/4k) 或自定义尺寸 (如 '1024x2048')
+  resolution?: '1k' | '2k' | '4k' | `${number}x${number}`
   aspectRatio?: '1:1' | '4:3' | '16:9' | '9:16' | '3:2' | '2:3'
 }
 
@@ -54,7 +55,8 @@ export interface ImageRequestContext {
   provider?: ProviderType
   modelId?: string
   apiFormat?: ApiFormat
-  resolution?: '1k' | '2k' | '4k'
+  // resolution 支持预设值 (1k/2k/4k) 或自定义尺寸 (如 '1024x2048')
+  resolution?: '1k' | '2k' | '4k' | `${number}x${number}`
   aspectRatio?: '1:1' | '4:3' | '16:9' | '9:16' | '3:2' | '2:3'
 }
 
