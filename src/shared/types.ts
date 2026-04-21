@@ -8,6 +8,8 @@ export interface ModelMappingConfig {
   modelId: string
   provider?: ImageProvider
   apiFormat?: ApiFormat
+  /** 是否为受限模型，仅模型白名单内的用户可调用 */
+  restricted?: boolean
 }
 
 export interface ImageGenerationModifiers {

@@ -27,6 +27,8 @@ export interface Config {
   rateLimitWindow: number
   rateLimitMax: number
   adminUsers: string[]
+  permanentMembers: string[]
+  modelWhitelistUsers: string[]
   styles: StyleConfig[]
   styleGroups?: Record<string, StyleGroupConfig>
   logLevel: 'info' | 'debug'
@@ -156,6 +158,7 @@ export const Config: Schema<Config> = Schema.intersect([
         Schema.const('gemini').description('Gemini 原生'),
         Schema.const('openai').description('GPT Image'),
       ]).default('gemini').description('接口格式'),
+      restricted: Schema.boolean().default(false).description('是否为受限模型（仅模型白名单用户可调用）'),
     }).collapse()).role('table').default([]).description('根据 -后缀切换模型'),
   }).description('🔀 模型映射'),
 
@@ -196,7 +199,13 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     adminUsers: Schema.array(Schema.string())
       .default([])
-      .description('管理员用户ID列表（不受每日使用限制）'),
+      .description('管理员用户ID列表（拥有所有权限，不受任何限制）'),
+    permanentMembers: Schema.array(Schema.string())
+      .default([])
+      .description('永久会员用户ID列表（无限量使用图像/视频生成，不受每日配额和限流限制）'),
+    modelWhitelistUsers: Schema.array(Schema.string())
+      .default([])
+      .description('模型白名单用户ID列表（可调用标记为"受限"的模型，管理员自动拥有此权限）'),
     logLevel: Schema.union([
       Schema.const('info').description('普通信息'),
       Schema.const('debug').description('完整的debug信息'),

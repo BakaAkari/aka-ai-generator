@@ -162,6 +162,14 @@ export class UserManager {
     return config.adminUsers && config.adminUsers.includes(userId)
   }
 
+  isPermanentMember(userId: string, config: Config): boolean {
+    return (config.permanentMembers && config.permanentMembers.includes(userId)) || false
+  }
+
+  isModelWhitelisted(userId: string, config: Config): boolean {
+    return this.isAdmin(userId, config) || (config.modelWhitelistUsers && config.modelWhitelistUsers.includes(userId)) || false
+  }
+
   // --- 数据持久化 ---
 
   private async loadUsersData(): Promise<UsersData> {
@@ -554,6 +562,11 @@ export class UserManager {
     // 管理员免配额
     if (this.isAdmin(userId, config)) {
       return { allowed: true, reservationId: 'admin' }
+    }
+
+    // 永久会员免配额
+    if (this.isPermanentMember(userId, config)) {
+      return { allowed: true, reservationId: 'permanent_member' }
     }
 
     // 平台免配额（如飞书/lark）

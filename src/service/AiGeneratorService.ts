@@ -362,9 +362,10 @@ export class AiGeneratorService extends Service {
 
   async recordUsage(userId: string, userName: string, commandName: string, numImages: number, platform?: string): Promise<UsageRecordingResult> {
     const isAdmin = this.userManager.isAdmin(userId, this.pluginConfig)
+    const isPermanentMember = this.userManager.isPermanentMember(userId, this.pluginConfig)
     const isPlatformExempt = Boolean(platform && this.pluginConfig.unlimitedPlatforms?.includes(platform))
 
-    if (isAdmin || isPlatformExempt) {
+    if (isAdmin || isPermanentMember || isPlatformExempt) {
       const userData = await this.userManager.recordUsageOnly(userId, userName, commandName, numImages)
       return {
         totalUsageCount: userData.totalUsageCount,

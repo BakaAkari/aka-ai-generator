@@ -3,6 +3,7 @@ import { COMMANDS, STYLE_TRANSFER_PROMPT } from '../shared/constants'
 import { getStyleTransferImages } from './image-input'
 import { parseStyleCommandModifiers } from '../utils/parser'
 import type { Config } from '../shared/config'
+import type { UserManager } from '../services/UserManager'
 import type {
   ImageGenerationModifiers,
   ImageRequestContext,
@@ -14,6 +15,7 @@ interface RegisterImageCommandsParams {
   ctx: Context
   config: Config
   logger: ReturnType<Context['logger']>
+  userManager: UserManager
   styleDefinitions: ResolvedStyleConfig[]
   modelMappingIndex: Map<string, ModelMappingConfig>
   reserveGenerationQuota: (session: Session, numImages: number) => Promise<{ allowed: boolean, message?: string }>
@@ -68,6 +70,7 @@ export function registerImageCommands(params: RegisterImageCommandsParams) {
     ctx,
     config,
     logger,
+    userManager,
     styleDefinitions,
     modelMappingIndex,
     reserveGenerationQuota,
@@ -76,6 +79,16 @@ export function registerImageCommands(params: RegisterImageCommandsParams) {
     processPresetImagesWithTimeout,
     processComposeImageWithTimeout,
   } = params
+
+  /**
+   * 检查用户是否有权限使用受限模型。
+   * 若 modelMapping 标记了 restricted=true，则只有模型白名单用户（或管理员）可以调用。
+   */
+  function checkRestrictedModelAccess(session: Session, modelMapping?: ModelMappingConfig): string | null {
+    if (!modelMapping?.restricted) return null
+    if (userManager.isModelWhitelisted(session.userId!, config)) return null
+    return `您没有权限使用该模型（${modelMapping.modelId}），此模型仅限白名单用户调用`
+  }
 
   const hasStyleTransferCommand = styleDefinitions.some(style => style.commandName === COMMANDS.STYLE_TRANSFER)
 
@@ -93,6 +106,9 @@ export function registerImageCommands(params: RegisterImageCommandsParams) {
           const modifiers = parseStyleCommandModifiers(argv, img, modelMappingIndex)
           const userPromptText = (modifiers.customAdditions || []).join(' - ')
           const numImages = options?.num || config.defaultNumImages
+
+          const restrictedCheck = checkRestrictedModelAccess(session, modifiers.modelMapping)
+          if (restrictedCheck) return restrictedCheck
 
           const limitCheck = await reserveGenerationQuota(session, numImages)
           if (!limitCheck.allowed) {
@@ -126,6 +142,10 @@ export function registerImageCommands(params: RegisterImageCommandsParams) {
 
       const numImages = options?.num || config.defaultNumImages
       const modifiers = parseStyleCommandModifiers(argv, prompt, modelMappingIndex)
+
+      const restrictedCheck = checkRestrictedModelAccess(session, modifiers.modelMapping)
+      if (restrictedCheck) return restrictedCheck
+
       const limitCheck = await reserveGenerationQuota(session, numImages)
       if (!limitCheck.allowed) {
         return limitCheck.message
@@ -145,6 +165,10 @@ export function registerImageCommands(params: RegisterImageCommandsParams) {
       const numImages = options?.num || config.defaultNumImages
       const mode = options?.multiple ? 'multiple' : 'single'
       const modifiers = parseStyleCommandModifiers(argv, img, modelMappingIndex)
+
+      const restrictedCheck = checkRestrictedModelAccess(session, modifiers.modelMapping)
+      if (restrictedCheck) return restrictedCheck
+
       const limitCheck = await reserveGenerationQuota(session, numImages)
       if (!limitCheck.allowed) {
         return limitCheck.message
@@ -163,6 +187,10 @@ export function registerImageCommands(params: RegisterImageCommandsParams) {
 
         const numImages = options?.num || config.defaultNumImages
         const modifiers = parseStyleCommandModifiers(argv, img, modelMappingIndex)
+
+        const restrictedCheck = checkRestrictedModelAccess(session, modifiers.modelMapping)
+        if (restrictedCheck) return restrictedCheck
+
         const limitCheck = await reserveGenerationQuota(session, numImages)
         if (!limitCheck.allowed) {
           return limitCheck.message
@@ -193,6 +221,10 @@ export function registerImageCommands(params: RegisterImageCommandsParams) {
 
       const modifiers = parseStyleCommandModifiers(argv, undefined, modelMappingIndex)
       const imageCount = options?.num || config.defaultNumImages
+
+      const restrictedCheck = checkRestrictedModelAccess(session, modifiers.modelMapping)
+      if (restrictedCheck) return restrictedCheck
+
       const limitCheck = await reserveGenerationQuota(session, imageCount)
       if (!limitCheck.allowed) {
         return limitCheck.message

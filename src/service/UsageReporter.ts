@@ -59,13 +59,14 @@ export class UsageReporter {
 
     const isPlatformExempt = platform && this.config.unlimitedPlatforms?.includes(platform)
     const isAdmin = this.userManager.isAdmin(userId, this.config)
+    const isPermanentMember = this.userManager.isPermanentMember(userId, this.config)
 
     let userData: any
     let consumptionType: 'free' | 'purchased' | 'mixed' = 'free'
     let freeUsed = 0
     let purchasedUsed = 0
 
-    if (isAdmin || isPlatformExempt) {
+    if (isAdmin || isPermanentMember || isPlatformExempt) {
       userData = await this.userManager.recordUsageOnly(userId, userName, commandName, numImages)
     } else {
       const result = await this.userManager.consumeQuota(userId, userName, commandName, numImages, this.config)
@@ -87,6 +88,7 @@ export class UsageReporter {
       dailyUsageCount: userData.dailyUsageCount,
       remainingPurchasedCount: userData.remainingPurchasedCount,
       isAdmin,
+      isPermanentMember,
       isPlatformExempt,
       platform,
     })
@@ -168,10 +170,15 @@ export class UsageReporter {
     platform?: string,
   ): string {
     const isAdmin = this.userManager.isAdmin(userData.userId, this.config)
+    const isPermanentMember = this.userManager.isPermanentMember(userData.userId, this.config)
     const isPlatformExempt = platform && this.config.unlimitedPlatforms?.includes(platform)
 
     if (isAdmin) {
       return `📊 使用统计 [管理员]\n用户：${userData.userName}\n总调用次数：${userData.totalUsageCount}次\n状态：无限制使用`
+    }
+
+    if (isPermanentMember) {
+      return `📊 使用统计 [永久会员]\n用户：${userData.userName}\n总调用次数：${userData.totalUsageCount}次\n状态：无限制使用`
     }
 
     if (isPlatformExempt) {

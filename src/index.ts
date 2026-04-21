@@ -173,6 +173,7 @@ export function apply(ctx: Context, config: PluginConfig) {
     ctx,
     config,
     logger,
+    userManager,
     styleDefinitions,
     modelMappingIndex,
     reserveGenerationQuota: usageReporter.reserveGenerationQuota.bind(usageReporter),

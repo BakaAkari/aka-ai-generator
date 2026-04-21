@@ -226,10 +226,23 @@ export async function handleQueryQuotaCommand(
 
   try {
     const userData = await userManager.getUserData(targetUserId, targetUserName)
+    const isAdmin = userManager.isAdmin(targetUserId, config)
+    const isPermanentMember = userManager.isPermanentMember(targetUserId, config)
+    const isModelWhitelisted = userManager.isModelWhitelisted(targetUserId, config)
+
+    if (isAdmin) {
+      return `👤 用户额度信息\n用户：${userData.userName}\n身份：管理员 👑\n历史总调用：${userData.totalUsageCount}次\n状态：无限制使用`
+    }
+
+    if (isPermanentMember) {
+      return `👤 用户额度信息\n用户：${userData.userName}\n身份：永久会员 ⭐\n历史总调用：${userData.totalUsageCount}次\n状态：无限制使用${isModelWhitelisted ? '\n模型权限：可调用受限模型 🔓' : ''}`
+    }
+
     const remainingToday = Math.max(0, config.dailyFreeLimit - userData.dailyUsageCount)
     const totalAvailable = remainingToday + userData.remainingPurchasedCount
+    const modelPermissionLine = isModelWhitelisted ? '\n模型权限：可调用受限模型 🔓' : ''
 
-    return `👤 用户额度信息\n用户：${userData.userName}\n今日剩余免费：${remainingToday}次\n充值剩余：${userData.remainingPurchasedCount}次\n总可用次数：${totalAvailable}次\n历史总调用：${userData.totalUsageCount}次\n历史总充值：${userData.purchasedCount}次`
+    return `👤 用户额度信息\n用户：${userData.userName}\n今日剩余免费：${remainingToday}次\n充值剩余：${userData.remainingPurchasedCount}次\n总可用次数：${totalAvailable}次\n历史总调用：${userData.totalUsageCount}次\n历史总充值：${userData.purchasedCount}次${modelPermissionLine}`
   } catch (error) {
     logger.error('查询额度失败', error)
     return '查询失败，请稍后重试'
