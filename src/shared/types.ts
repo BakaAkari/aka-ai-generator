@@ -1,6 +1,6 @@
 import type { ProviderType } from '../providers'
 
-export type ImageProvider = 'yunwu' | 'gptgod' | 'gemini'
+export type ImageProvider = 'yunwu' | 'gptgod' | 'gemini' | 'grok'
 export type ApiFormat = 'gemini' | 'openai'
 
 export interface ModelMappingConfig {

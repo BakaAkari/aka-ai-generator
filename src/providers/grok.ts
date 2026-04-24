@@ -1,55 +1,64 @@
 import { ImageProvider, ProviderConfig, ImageGenerationOptions } from './types'
 import { sanitizeError, sanitizeString, downloadImageAsBase64 } from './utils'
 
-export interface OpenAIImagesConfig extends ProviderConfig {
+export interface GrokConfig extends ProviderConfig {
   apiKey: string
   modelId: string
   apiBase?: string
 }
 
 /**
- * 解析 OpenAI Images API 响应
+ * Grok Image API size mapping
+ *
+ * yunwu Grok Image creation endpoint supports:
+ *   960x960, 720x1280, 1280x720, 1168x784, 784x1168
+ *
+ * yunwu Grok Image edit endpoint accepts aspect_ratio directly:
+ *   "1:1" | "3:4" | "4:3" | "9:16" | "16:9" | "2:3" | "3:2" |
+ *   "9:19.5" | "19.5:9" | "9:20" | "20:9" | "1:2" | "2:1" | "auto"
+ *
+ * yunwu Grok Image edit endpoint accepts resolution: "1k" | "2k"
+ * yunwu Grok Image edit endpoint accepts quality: "low" | "medium" | "high"
  */
-function parseOpenAIImagesResponse(response: any, logger?: any): string[] {
+
+/**
+ * Parse Grok Image API response (same format as OpenAI Images API)
+ */
+function parseGrokResponse(response: any, logger?: any): string[] {
   try {
     const images: string[] = []
 
-    logger?.debug('开始解析 OpenAI Images API 响应', {
+    logger?.debug('parsing Grok Image API response', {
       hasResponse: !!response,
       responseType: typeof response,
       responseKeys: response ? Object.keys(response) : []
     })
 
     if (!response) {
-      logger?.error('OpenAI Images API 响应为空')
+      logger?.error('Grok Image API response is empty')
       return []
     }
 
-    // 检查错误
     if (response.error) {
       const sanitizedError = sanitizeError(response.error)
-      logger?.error('OpenAI Images API 返回错误', { error: sanitizedError })
+      logger?.error('Grok Image API returned error', { error: sanitizedError })
       const errorMessage = response.error.message || JSON.stringify(sanitizedError)
-      throw new Error(`OpenAI Images API 错误: ${sanitizeString(errorMessage)}`)
+      throw new Error(`Grok Image API error: ${sanitizeString(errorMessage)}`)
     }
 
-    // 检查 data 数组
     if (response.data && Array.isArray(response.data)) {
       for (const item of response.data) {
-        // 支持 b64_json 格式
         if (item.b64_json) {
-          const mimeType = 'image/png' // GPT Image 默认返回 PNG
+          const mimeType = 'image/jpeg'
           const dataUrl = `data:${mimeType};base64,${item.b64_json}`
           images.push(dataUrl)
-          logger?.info('从响应中提取到图片 (b64_json)', {
+          logger?.info('extracted image from response (b64_json)', {
             dataLength: item.b64_json.length,
             imageIndex: images.length - 1
           })
-        }
-        // 支持 url 格式
-        else if (item.url) {
+        } else if (item.url) {
           images.push(item.url)
-          logger?.info('从响应中提取到图片 (url)', {
+          logger?.info('extracted image from response (url)', {
             url: item.url.substring(0, 50) + '...',
             imageIndex: images.length - 1
           })
@@ -58,7 +67,7 @@ function parseOpenAIImagesResponse(response: any, logger?: any): string[] {
     }
 
     if (images.length === 0) {
-      logger?.error('未能从 OpenAI Images API 响应中提取到图片', {
+      logger?.error('no images extracted from Grok Image API response', {
         responseKeys: Object.keys(response),
         response: JSON.stringify(response).substring(0, 1000)
       })
@@ -66,14 +75,14 @@ function parseOpenAIImagesResponse(response: any, logger?: any): string[] {
 
     return images
   } catch (error: any) {
-    const safeMessage = sanitizeString(error?.message || '未知错误')
-    logger?.error('解析 OpenAI Images 响应时出错', { error: safeMessage })
+    const safeMessage = sanitizeString(error?.message || 'unknown error')
+    logger?.error('error parsing Grok Image response', { error: safeMessage })
     throw new Error(safeMessage)
   }
 }
 
 /**
- * 将 Base64 数据转换为 Blob（用于 multipart/form-data）
+ * Convert Base64 data to Blob (for multipart/form-data)
  */
 function base64ToBlob(base64Data: string, mimeType: string): Blob {
   const byteCharacters = atob(base64Data)
@@ -85,10 +94,10 @@ function base64ToBlob(base64Data: string, mimeType: string): Blob {
   return new Blob([byteArray], { type: mimeType })
 }
 
-export class OpenAIImagesProvider implements ImageProvider {
-  private config: OpenAIImagesConfig
+export class GrokProvider implements ImageProvider {
+  private config: GrokConfig
 
-  constructor(config: OpenAIImagesConfig) {
+  constructor(config: GrokConfig) {
     this.config = config
   }
 
@@ -106,7 +115,7 @@ export class OpenAIImagesProvider implements ImageProvider {
     const logger = this.config.logger
     const ctx = this.config.ctx
 
-    logger.debug('OpenAIImagesProvider 开始生成', {
+    logger.debug('GrokProvider starting generation', {
       prompt: prompt.substring(0, 100),
       hasInputImages,
       inputImageCount: validUrls.length,
@@ -118,16 +127,14 @@ export class OpenAIImagesProvider implements ImageProvider {
       let images: string[]
 
       if (hasInputImages) {
-        // 图生图：使用 /v1/images/edits，支持多张图片
         images = await this.editImages(prompt, validUrls, numImages, options, onImageGenerated)
       } else {
-        // 文生图：使用 /v1/images/generations
         images = await this.createImages(prompt, numImages, options, onImageGenerated)
       }
 
       return images
     } catch (error: any) {
-      logger.error('OpenAIImagesProvider 生成失败', {
+      logger.error('GrokProvider generation failed', {
         error: sanitizeError(error),
         hasInputImages,
         modelId: this.config.modelId
@@ -137,29 +144,25 @@ export class OpenAIImagesProvider implements ImageProvider {
   }
 
   /**
-   * 文生图：调用 /v1/images/generations
-   */
-  /**
-   * 根据宽高比获取 size 参数
-   * 注意：GPT Image API 只支持固定尺寸，不支持动态分辨率 (1k/2k/4k)
+   * Map aspectRatio to Grok creation size.
+   *
+   * Grok creation endpoint only accepts fixed sizes:
+   *   960x960, 720x1280, 1280x720, 1168x784, 784x1168
    */
   private getSizeFromAspectRatio(aspectRatio?: string): string {
-    // yunwu/OpenAI Images API 支持的尺寸:
-    // 1024x1024, 1536x1024, 1024x1536, 2048x2048, 2048x1152, 3840x2160, 2160x3840, auto
-    // 约束: 最长边 <= 3840px, 两边均为 16 的倍数, 宽高比 <= 3:1, 总像素 655360~8294400
     const sizeMap: Record<string, string> = {
-      '1:1': '1024x1024',
-      '3:2': '1536x1024',   // 横版 3:2
-      '2:3': '1024x1536',   // 竖版 2:3
-      '16:9': '2048x1152',  // 横版 16:9（精确比例）
-      '9:16': '1152x2048',  // 竖版 9:16（精确比例）
-      '4:3': '1536x1024',   // 横版（接近 4:3，API 无精确 4:3 尺寸）
+      '1:1': '960x960',
+      '16:9': '1280x720',
+      '9:16': '720x1280',
+      '3:2': '1168x784',    // closest to 3:2 (1168/784 ~ 1.49)
+      '2:3': '784x1168',    // closest to 2:3
+      '4:3': '1168x784',    // closest to 4:3 (no exact match)
     }
-    return sizeMap[aspectRatio || '1:1'] || '1024x1024'
+    return sizeMap[aspectRatio || '1:1'] || '960x960'
   }
 
   /**
-   * 检查是否是自定义分辨率格式 (如 1024x2048)
+   * Check if a resolution string is a custom pixel size (e.g. "960x960")
    */
   private isCustomResolution(resolution?: string): boolean {
     if (!resolution) return false
@@ -167,18 +170,47 @@ export class OpenAIImagesProvider implements ImageProvider {
   }
 
   /**
-   * 获取最终的 size 参数
-   * 优先级：自定义分辨率 > 宽高比映射
+   * Get the final size parameter for the creation endpoint.
+   * Priority: custom resolution > aspectRatio mapping
    */
-  private getSize(options?: ImageGenerationOptions): string {
-    // 如果是自定义分辨率格式 (如 1024x2048)，直接使用
+  private getCreateSize(options?: ImageGenerationOptions): string {
     if (options?.resolution && this.isCustomResolution(options.resolution)) {
       return options.resolution
     }
-    // 否则根据宽高比映射
     return this.getSizeFromAspectRatio(options?.aspectRatio)
   }
 
+  /**
+   * Map aspectRatio for the edit endpoint.
+   *
+   * Grok edit endpoint accepts aspect_ratio directly as a string:
+   *   "1:1" | "3:4" | "4:3" | "9:16" | "16:9" | "2:3" | "3:2" |
+   *   "9:19.5" | "19.5:9" | "9:20" | "20:9" | "1:2" | "2:1" | "auto"
+   */
+  private getEditAspectRatio(aspectRatio?: string): string | undefined {
+    if (!aspectRatio) return undefined
+    // The edit endpoint supports these ratios directly
+    const validRatios = new Set([
+      '1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2',
+      '9:19.5', '19.5:9', '9:20', '20:9', '1:2', '2:1', 'auto'
+    ])
+    return validRatios.has(aspectRatio) ? aspectRatio : undefined
+  }
+
+  /**
+   * Map resolution for the edit endpoint.
+   * Grok edit endpoint accepts: "1k" | "2k"
+   */
+  private getEditResolution(resolution?: string): string | undefined {
+    if (!resolution) return undefined
+    if (resolution === '1k' || resolution === '2k') return resolution
+    // 4k is not supported by Grok edit endpoint
+    return undefined
+  }
+
+  /**
+   * Text-to-image: POST /v1/images/generations
+   */
   private async createImages(
     prompt: string,
     numImages: number,
@@ -189,36 +221,34 @@ export class OpenAIImagesProvider implements ImageProvider {
     const apiBase = this.config.apiBase?.replace(/\/$/, '') || 'https://yunwu.ai'
 
     const allImages: string[] = []
-    
-    // 获取 size 参数 (优先使用自定义分辨率)
-    const size = this.getSize(options)
-    
-    // 提示用户：1k/2k/4k 预设分辨率不被 OpenAI Images API 支持
+
+    const size = this.getCreateSize(options)
+
+    // Grok creation endpoint does not support 1k/2k/4k preset resolutions
     if (options?.resolution && ['1k', '2k', '4k'].includes(options.resolution)) {
-      logger?.info('当前模型不支持 1k/2k/4k 预设分辨率，已忽略', { 
+      logger?.info('Grok creation endpoint does not support preset resolutions, ignored', {
         resolution: options.resolution,
-        note: '请使用 Gemini 模型以获得预设分辨率控制，或使用自定义尺寸如 1024x2048'
+        note: 'Use Grok edit endpoint or Gemini for preset resolution control'
       })
     }
-    
-    logger?.debug('OpenAI Images 生成参数', { 
-      size, 
+
+    logger?.debug('Grok Image creation params', {
+      size,
       aspectRatio: options?.aspectRatio,
       resolution: options?.resolution
     })
 
-    // 每次调用生成一张图片，循环调用
     for (let i = 0; i < numImages; i++) {
-      const requestData = {
+      const requestData: Record<string, any> = {
         model: this.config.modelId,
         prompt,
-        n: 1,
         size
       }
 
-      logger.debug('调用 OpenAI Images 文生图 API', {
+      logger.debug('calling Grok Image creation API', {
         prompt: prompt.substring(0, 100),
         model: this.config.modelId,
+        size,
         current: i + 1,
         total: numImages
       })
@@ -236,32 +266,31 @@ export class OpenAIImagesProvider implements ImageProvider {
           }
         )
 
-        const images = parseOpenAIImagesResponse(response, this.config.logLevel === 'debug' ? logger : null)
+        const images = parseGrokResponse(response, this.config.logLevel === 'debug' ? logger : null)
 
         if (images.length === 0) {
-          logger.warn('OpenAI Images API 调用成功但未解析到图片', {
+          logger.warn('Grok Image API call succeeded but no images parsed', {
             current: i + 1,
             total: numImages
           })
           continue
         }
 
-        // 流式处理
         for (let imgIdx = 0; imgIdx < images.length; imgIdx++) {
           const imageUrl = images[imgIdx]
           const currentIndex = allImages.length
           allImages.push(imageUrl)
 
           if (onImageGenerated) {
-            logger.info('调用图片生成回调函数 (OpenAI)', {
+            logger.info('calling image generation callback (Grok)', {
               currentIndex,
               total: numImages
             })
             try {
               await onImageGenerated(imageUrl, currentIndex, numImages)
-              logger.info('图片生成回调函数执行成功 (OpenAI)', { currentIndex, total: numImages })
-            } catch (callbackError) {
-              logger.error('图片生成回调函数执行失败 (OpenAI)', {
+              logger.info('image generation callback succeeded (Grok)', { currentIndex, total: numImages })
+            } catch (callbackError: any) {
+              logger.error('image generation callback failed (Grok)', {
                 error: sanitizeError(callbackError),
                 currentIndex,
                 total: numImages
@@ -271,35 +300,41 @@ export class OpenAIImagesProvider implements ImageProvider {
           }
         }
 
-        logger.success('OpenAI Images 文生图 API 调用成功', { current: i + 1, total: numImages })
+        logger.success('Grok Image creation API call succeeded', { current: i + 1, total: numImages })
 
       } catch (error: any) {
-        const safeMessage = sanitizeString(error?.message || '未知错误')
-        logger.error('OpenAI Images 文生图 API 调用失败', {
+        const safeMessage = sanitizeString(error?.message || 'unknown error')
+        logger.error('Grok Image creation API call failed', {
           message: safeMessage,
           current: i + 1,
           total: numImages
         })
 
-        // 如果已经生成了一些图片，返回已生成的
         if (allImages.length > 0) {
-          logger.warn('部分图片生成失败，返回已生成的图片', { generated: allImages.length, requested: numImages })
+          logger.warn('partial images generated, returning available images', { generated: allImages.length, requested: numImages })
           break
         }
 
-        throw new Error(`图像生成失败: ${safeMessage}`)
+        throw new Error(`image generation failed: ${safeMessage}`)
       }
     }
 
     if (allImages.length === 0) {
-      throw new Error('未能生成任何图片')
+      throw new Error('failed to generate any images')
     }
 
     return allImages
   }
 
   /**
-   * 图生图：调用 /v1/images/edits，支持多张图片输入
+   * Image editing: POST /v1/images/edits (multipart/form-data)
+   *
+   * Grok edit endpoint supports additional parameters:
+   *   - aspect_ratio: direct ratio string
+   *   - resolution: "1k" | "2k"
+   *   - quality: "low" | "medium" | "high"
+   *   - response_format: "b64_json" | "url"
+   *   - n: number of output images (max 10)
    */
   private async editImages(
     prompt: string,
@@ -312,57 +347,56 @@ export class OpenAIImagesProvider implements ImageProvider {
     const apiBase = this.config.apiBase?.replace(/\/$/, '') || 'https://yunwu.ai'
 
     const allImages: string[] = []
-    
-    // 获取 size 参数 (优先使用自定义分辨率)
-    const size = this.getSize(options)
 
-    // 下载所有输入图片
-    logger.debug('下载输入图片用于编辑', { imageCount: imageUrls.length, size, resolution: options?.resolution })
+    // Download input images
+    logger.debug('downloading input images for editing', { imageCount: imageUrls.length })
     const imageBlobs: Blob[] = []
-    
-    for (const url of imageUrls) {
-      try {
-        const { data, mimeType } = await downloadImageAsBase64(
-          ctx,
-          url,
-          this.config.apiTimeout,
-          logger
-        )
-        const blob = base64ToBlob(data, mimeType)
-        imageBlobs.push(blob)
-        logger.debug('图片下载成功', { mimeType, size: blob.size })
-      } catch (error) {
-        logger.error('下载输入图片失败', { url, error: sanitizeError(error) })
-        // 继续处理其他图片
-      }
+
+    // Grok edit endpoint only supports 1 input image
+    const targetUrl = imageUrls[0]
+    try {
+      const { data, mimeType } = await downloadImageAsBase64(
+        ctx,
+        targetUrl,
+        this.config.apiTimeout,
+        logger
+      )
+      const blob = base64ToBlob(data, mimeType)
+      imageBlobs.push(blob)
+      logger.debug('image download succeeded', { mimeType, size: blob.size })
+    } catch (error) {
+      logger.error('failed to download input image', { url: targetUrl, error: sanitizeError(error) })
     }
 
     if (imageBlobs.length === 0) {
-      throw new Error('所有输入图片下载失败，无法进行图像编辑')
+      throw new Error('failed to download input image, cannot perform image editing')
     }
 
-    // 每次调用生成一张图片，循环调用
+    // Resolve edit-specific parameters
+    const editAspectRatio = this.getEditAspectRatio(options?.aspectRatio)
+    const editResolution = this.getEditResolution(options?.resolution)
+
     for (let i = 0; i < numImages; i++) {
       try {
-        // 构建 FormData
         const formData = new FormData()
-        
-        // 添加所有图片（第一张是主要编辑对象，其他作为参考）
-        for (let idx = 0; idx < imageBlobs.length; idx++) {
-          const blob = imageBlobs[idx]
-          const filename = `image_${idx}.png`
-          formData.append('image', blob, filename)
-        }
-        
+
+        formData.append('image', imageBlobs[0], 'image_0.png')
         formData.append('prompt', prompt)
         formData.append('model', this.config.modelId)
         formData.append('n', '1')
-        formData.append('size', size)
 
-        logger.debug('调用 OpenAI Images 编辑 API', {
+        if (editAspectRatio) {
+          formData.append('aspect_ratio', editAspectRatio)
+        }
+        if (editResolution) {
+          formData.append('resolution', editResolution)
+        }
+
+        logger.debug('calling Grok Image edit API', {
           prompt: prompt.substring(0, 100),
           model: this.config.modelId,
-          inputImageCount: imageBlobs.length,
+          aspectRatio: editAspectRatio,
+          resolution: editResolution,
           current: i + 1,
           total: numImages
         })
@@ -373,38 +407,37 @@ export class OpenAIImagesProvider implements ImageProvider {
           {
             headers: {
               'Authorization': `Bearer ${this.config.apiKey}`
-              // Content-Type 由浏览器/运行时自动设置（包含 boundary）
+              // Content-Type is set automatically by the runtime (includes boundary)
             },
             timeout: this.config.apiTimeout * 1000
           }
         )
 
-        const images = parseOpenAIImagesResponse(response, this.config.logLevel === 'debug' ? logger : null)
+        const images = parseGrokResponse(response, this.config.logLevel === 'debug' ? logger : null)
 
         if (images.length === 0) {
-          logger.warn('OpenAI Images 编辑 API 调用成功但未解析到图片', {
+          logger.warn('Grok Image edit API call succeeded but no images parsed', {
             current: i + 1,
             total: numImages
           })
           continue
         }
 
-        // 流式处理
         for (let imgIdx = 0; imgIdx < images.length; imgIdx++) {
           const imageUrl = images[imgIdx]
           const currentIndex = allImages.length
           allImages.push(imageUrl)
 
           if (onImageGenerated) {
-            logger.info('调用图片生成回调函数 (OpenAI 编辑)', {
+            logger.info('calling image generation callback (Grok edit)', {
               currentIndex,
               total: numImages
             })
             try {
               await onImageGenerated(imageUrl, currentIndex, numImages)
-              logger.info('图片生成回调函数执行成功 (OpenAI 编辑)', { currentIndex, total: numImages })
-            } catch (callbackError) {
-              logger.error('图片生成回调函数执行失败 (OpenAI 编辑)', {
+              logger.info('image generation callback succeeded (Grok edit)', { currentIndex, total: numImages })
+            } catch (callbackError: any) {
+              logger.error('image generation callback failed (Grok edit)', {
                 error: sanitizeError(callbackError),
                 currentIndex,
                 total: numImages
@@ -414,28 +447,27 @@ export class OpenAIImagesProvider implements ImageProvider {
           }
         }
 
-        logger.success('OpenAI Images 编辑 API 调用成功', { current: i + 1, total: numImages })
+        logger.success('Grok Image edit API call succeeded', { current: i + 1, total: numImages })
 
       } catch (error: any) {
-        const safeMessage = sanitizeString(error?.message || '未知错误')
-        logger.error('OpenAI Images 编辑 API 调用失败', {
+        const safeMessage = sanitizeString(error?.message || 'unknown error')
+        logger.error('Grok Image edit API call failed', {
           message: safeMessage,
           current: i + 1,
           total: numImages
         })
 
-        // 如果已经生成了一些图片，返回已生成的
         if (allImages.length > 0) {
-          logger.warn('部分图片生成失败，返回已生成的图片', { generated: allImages.length, requested: numImages })
+          logger.warn('partial images generated, returning available images', { generated: allImages.length, requested: numImages })
           break
         }
 
-        throw new Error(`图像编辑失败: ${safeMessage}`)
+        throw new Error(`image editing failed: ${safeMessage}`)
       }
     }
 
     if (allImages.length === 0) {
-      throw new Error('未能生成任何图片')
+      throw new Error('failed to generate any images')
     }
 
     return allImages

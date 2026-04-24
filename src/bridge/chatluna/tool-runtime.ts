@@ -264,21 +264,36 @@ function resolveRequestedStylePreset(
   return { preset: matches[0].style, matches }
 }
 
+const VALID_ASPECT_RATIOS = new Set(['1:1', '4:3', '16:9', '9:16', '3:2', '2:3'])
+const VALID_RESOLUTIONS = new Set(['1k', '2k', '4k'])
+const CUSTOM_RESOLUTION_RE = /^\d{3,5}x\d{3,5}$/
+
 function buildRequestContext(
   input: Record<string, unknown>,
   config: ReturnType<ChatLunaConfigAccessor>,
 ): ImageRequestContext {
-  const requestContext: ImageRequestContext = {
-    numImages: typeof input.numImages === 'number' ? input.numImages : config.defaultNumImages,
+  // numImages: clamp to [1, 4] and fall back to config default
+  let numImages = config.defaultNumImages
+  if (typeof input.numImages === 'number' && Number.isFinite(input.numImages)) {
+    numImages = Math.max(1, Math.min(4, Math.round(input.numImages)))
   }
+
+  const requestContext: ImageRequestContext = { numImages }
   const modelSuffix = typeof input.modelSuffix === 'string' ? input.modelSuffix.trim() : ''
 
-  if (typeof input.aspectRatio === 'string') {
+  // aspectRatio: only accept known valid values; ignore anything else
+  if (typeof input.aspectRatio === 'string' && VALID_ASPECT_RATIOS.has(input.aspectRatio)) {
     requestContext.aspectRatio = input.aspectRatio as ImageRequestContext['aspectRatio']
   }
+
+  // resolution: accept preset keywords or NNNNxNNNN custom sizes; ignore anything else
   if (typeof input.resolution === 'string') {
-    requestContext.resolution = input.resolution as ImageRequestContext['resolution']
+    const res = input.resolution.trim()
+    if (VALID_RESOLUTIONS.has(res) || CUSTOM_RESOLUTION_RE.test(res)) {
+      requestContext.resolution = res as ImageRequestContext['resolution']
+    }
   }
+
   if (modelSuffix) {
     const mapping = config.modelMappings?.find(item => item.suffix === modelSuffix)
     if (mapping?.provider) requestContext.provider = mapping.provider

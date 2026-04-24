@@ -81,20 +81,25 @@ export class AiGeneratorService extends Service {
 
     return createImageProvider({
       provider: providerType,
-      yunwuApiKey: this.pluginConfig.yunwuApiKey,
+      yunwuApiKey: this.pluginConfig.yunwuApiKey || '',
       yunwuModelId: providerType === 'yunwu'
-        ? (targetModelId || this.pluginConfig.yunwuModelId)
-        : this.pluginConfig.yunwuModelId,
+        ? (targetModelId || this.pluginConfig.yunwuModelId || '')
+        : (this.pluginConfig.yunwuModelId || ''),
       yunwuApiFormat: targetApiFormat || this.pluginConfig.yunwuApiFormat || 'gemini',
-      gptgodApiKey: this.pluginConfig.gptgodApiKey,
+      gptgodApiKey: this.pluginConfig.gptgodApiKey || '',
       gptgodModelId: providerType === 'gptgod'
-        ? (targetModelId || this.pluginConfig.gptgodModelId)
-        : this.pluginConfig.gptgodModelId,
-      geminiApiKey: this.pluginConfig.geminiApiKey,
+        ? (targetModelId || this.pluginConfig.gptgodModelId || '')
+        : (this.pluginConfig.gptgodModelId || ''),
+      geminiApiKey: this.pluginConfig.geminiApiKey || '',
       geminiModelId: providerType === 'gemini'
-        ? (targetModelId || this.pluginConfig.geminiModelId)
-        : this.pluginConfig.geminiModelId,
-      geminiApiBase: this.pluginConfig.geminiApiBase,
+        ? (targetModelId || this.pluginConfig.geminiModelId || '')
+        : (this.pluginConfig.geminiModelId || ''),
+      geminiApiBase: this.pluginConfig.geminiApiBase || 'https://generativelanguage.googleapis.com',
+      grokApiKey: this.pluginConfig.grokApiKey || '',
+      grokModelId: providerType === 'grok'
+        ? (targetModelId || this.pluginConfig.grokModelId || 'grok-3-image')
+        : (this.pluginConfig.grokModelId || 'grok-3-image'),
+      grokApiBase: this.pluginConfig.grokApiBase || 'https://yunwu.ai',
       apiTimeout: this.pluginConfig.apiTimeout,
       logLevel: this.pluginConfig.logLevel,
       logger: this.pluginLogger,
@@ -174,10 +179,12 @@ export class AiGeneratorService extends Service {
     const provider = (params.requestContext?.provider || this.pluginConfig.provider) as ProviderType
     const modelId = params.requestContext?.modelId
       || (provider === 'yunwu'
-        ? this.pluginConfig.yunwuModelId
+        ? (this.pluginConfig.yunwuModelId || '')
         : provider === 'gptgod'
-          ? this.pluginConfig.gptgodModelId
-          : this.pluginConfig.geminiModelId)
+          ? (this.pluginConfig.gptgodModelId || '')
+          : provider === 'grok'
+            ? (this.pluginConfig.grokModelId || 'grok-3-image')
+            : (this.pluginConfig.geminiModelId || ''))
 
     const createdAt = Date.now()
     const records = params.imageUrls.map((imageUrl, index) => {

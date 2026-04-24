@@ -18,6 +18,9 @@ export interface Config {
   geminiApiKey?: string
   geminiModelId?: string
   geminiApiBase?: string
+  grokApiKey?: string
+  grokModelId?: string
+  grokApiBase?: string
   modelMappings?: ModelMappingConfig[]
   apiTimeout: number
   defaultNumImages: number
@@ -60,6 +63,7 @@ const ProviderSchema = Schema.object({
     Schema.const('yunwu').description('云雾'),
     Schema.const('gptgod').description('GPT God'),
     Schema.const('gemini').description('Google Gemini'),
+    Schema.const('grok').description('Grok (xAI)'),
   ]).default('yunwu').description('图像生成供应商'),
 }).description('🎨 图像生成配置')
 
@@ -77,6 +81,9 @@ const ProviderConfigSchema = Schema.union([
     geminiApiKey: Schema.string().role('secret').default('').hidden(),
     geminiModelId: Schema.string().default('').hidden(),
     geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
+    grokApiKey: Schema.string().role('secret').default('').hidden(),
+    grokModelId: Schema.string().default('grok-3-image').hidden(),
+    grokApiBase: Schema.string().default('https://yunwu.ai').hidden(),
   }),
   Schema.object({
     provider: Schema.const('gptgod'),
@@ -91,6 +98,9 @@ const ProviderConfigSchema = Schema.union([
     geminiApiKey: Schema.string().role('secret').default('').hidden(),
     geminiModelId: Schema.string().default('').hidden(),
     geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
+    grokApiKey: Schema.string().role('secret').default('').hidden(),
+    grokModelId: Schema.string().default('grok-3-image').hidden(),
+    grokApiBase: Schema.string().default('https://yunwu.ai').hidden(),
   }),
   Schema.object({
     provider: Schema.const('gemini'),
@@ -105,6 +115,26 @@ const ProviderConfigSchema = Schema.union([
     ]).default('gemini').hidden(),
     gptgodApiKey: Schema.string().role('secret').default('').hidden(),
     gptgodModelId: Schema.string().default('').hidden(),
+    grokApiKey: Schema.string().role('secret').default('').hidden(),
+    grokModelId: Schema.string().default('grok-3-image').hidden(),
+    grokApiBase: Schema.string().default('https://yunwu.ai').hidden(),
+  }),
+  Schema.object({
+    provider: Schema.const('grok'),
+    grokApiKey: Schema.string().role('secret').required().description('Grok API 密钥（通过云雾中转）'),
+    grokModelId: Schema.string().default('grok-3-image').description('Grok 图像模型ID'),
+    grokApiBase: Schema.string().default('https://yunwu.ai').description('Grok API 地址（云雾中转地址）'),
+    yunwuApiKey: Schema.string().role('secret').default('').hidden(),
+    yunwuModelId: Schema.string().default('gemini-2.5-flash-image').hidden(),
+    yunwuApiFormat: Schema.union([
+      Schema.const('gemini'),
+      Schema.const('openai'),
+    ]).default('gemini').hidden(),
+    gptgodApiKey: Schema.string().role('secret').default('').hidden(),
+    gptgodModelId: Schema.string().default('').hidden(),
+    geminiApiKey: Schema.string().role('secret').default('').hidden(),
+    geminiModelId: Schema.string().default('').hidden(),
+    geminiApiBase: Schema.string().default('https://generativelanguage.googleapis.com').hidden(),
   }),
 ])
 
@@ -153,11 +183,12 @@ export const Config: Schema<Config> = Schema.intersect([
         Schema.const('yunwu').description('云雾 (yunwu)'),
         Schema.const('gptgod').description('GPT God'),
         Schema.const('gemini').description('Google Gemini'),
+        Schema.const('grok').description('Grok (xAI)'),
       ]).default('yunwu').description('供应商'),
       apiFormat: Schema.union([
         Schema.const('gemini').description('Gemini 原生'),
         Schema.const('openai').description('GPT Image'),
-      ]).default('gemini').description('接口格式'),
+      ]).default('gemini').description('接口格式（仅 yunwu 供应商有效）'),
       restricted: Schema.boolean().default(false).description('是否为受限模型（仅模型白名单用户可调用）'),
     }).collapse()).role('table').default([]).description('根据 -后缀切换模型'),
   }).description('🔀 模型映射'),
