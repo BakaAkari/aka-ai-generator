@@ -300,6 +300,8 @@ export class OpenAIImagesProvider implements ImageProvider {
 
   /**
    * 图生图：调用 /v1/images/edits，支持多张图片输入
+   * 优先使用 JSON + base64 方式发送（兼容 Koishi ctx.http），
+   * 若失败则回退到 FormData multipart 方式。
    */
   private async editImages(
     prompt: string,
@@ -316,68 +318,106 @@ export class OpenAIImagesProvider implements ImageProvider {
     // 获取 size 参数 (优先使用自定义分辨率)
     const size = this.getSize(options)
 
-    // 下载所有输入图片
+    // 下载所有输入图片（保留 base64 数据用于 JSON 方式）
     logger.debug('下载输入图片用于编辑', { imageCount: imageUrls.length, size, resolution: options?.resolution })
-    const imageBlobs: Blob[] = []
+    const imageDataList: { data: string, mimeType: string }[] = []
     
     for (const url of imageUrls) {
       try {
-        const { data, mimeType } = await downloadImageAsBase64(
+        const result = await downloadImageAsBase64(
           ctx,
           url,
           this.config.apiTimeout,
           logger
         )
-        const blob = base64ToBlob(data, mimeType)
-        imageBlobs.push(blob)
-        logger.debug('图片下载成功', { mimeType, size: blob.size })
+        imageDataList.push(result)
+        logger.debug('图片下载成功', { mimeType: result.mimeType, dataLength: result.data.length })
       } catch (error) {
         logger.error('下载输入图片失败', { url, error: sanitizeError(error) })
         // 继续处理其他图片
       }
     }
 
-    if (imageBlobs.length === 0) {
+    if (imageDataList.length === 0) {
       throw new Error('所有输入图片下载失败，无法进行图像编辑')
     }
 
     // 每次调用生成一张图片，循环调用
     for (let i = 0; i < numImages; i++) {
       try {
-        // 构建 FormData
-        const formData = new FormData()
-        
-        // 添加所有图片（第一张是主要编辑对象，其他作为参考）
-        for (let idx = 0; idx < imageBlobs.length; idx++) {
-          const blob = imageBlobs[idx]
-          const filename = `image_${idx}.png`
-          formData.append('image', blob, filename)
-        }
-        
-        formData.append('prompt', prompt)
-        formData.append('model', this.config.modelId)
-        formData.append('n', '1')
-        formData.append('size', size)
-
         logger.debug('调用 OpenAI Images 编辑 API', {
           prompt: prompt.substring(0, 100),
           model: this.config.modelId,
-          inputImageCount: imageBlobs.length,
+          inputImageCount: imageDataList.length,
           current: i + 1,
           total: numImages
         })
 
-        const response = await ctx.http.post(
-          `${apiBase}/v1/images/edits`,
-          formData,
-          {
-            headers: {
-              'Authorization': `Bearer ${this.config.apiKey}`
-              // Content-Type 由浏览器/运行时自动设置（包含 boundary）
-            },
-            timeout: this.config.apiTimeout * 1000
+        let response: any
+
+        // 优先使用 JSON + base64 data URI 方式（兼容 Koishi ctx.http）
+        try {
+          const imageInputs = imageDataList.map(img =>
+            `data:${img.mimeType};base64,${img.data}`
+          )
+
+          const requestData: Record<string, any> = {
+            model: this.config.modelId,
+            prompt,
+            n: 1,
+            size,
+            image: imageInputs.length === 1 ? imageInputs[0] : imageInputs,
           }
-        )
+
+          logger.debug('使用 JSON + base64 方式调用编辑 API', {
+            imageCount: imageInputs.length,
+            model: this.config.modelId
+          })
+
+          response = await ctx.http.post(
+            `${apiBase}/v1/images/edits`,
+            requestData,
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.config.apiKey}`
+              },
+              timeout: this.config.apiTimeout * 1000
+            }
+          )
+        } catch (jsonError: any) {
+          // JSON 方式失败，回退到 FormData multipart 方式
+          logger.warn('JSON 方式调用编辑 API 失败，回退到 FormData 方式', {
+            error: sanitizeString(jsonError?.message || '未知错误')
+          })
+
+          const formData = new FormData()
+          
+          // 添加所有图片（第一张是主要编辑对象，其他作为参考）
+          for (let idx = 0; idx < imageDataList.length; idx++) {
+            const img = imageDataList[idx]
+            const blob = base64ToBlob(img.data, img.mimeType)
+            const filename = `image_${idx}.png`
+            formData.append('image', blob, filename)
+          }
+          
+          formData.append('prompt', prompt)
+          formData.append('model', this.config.modelId)
+          formData.append('n', '1')
+          formData.append('size', size)
+
+          response = await ctx.http.post(
+            `${apiBase}/v1/images/edits`,
+            formData,
+            {
+              headers: {
+                'Authorization': `Bearer ${this.config.apiKey}`
+                // Content-Type 由运行时自动设置（包含 boundary）
+              },
+              timeout: this.config.apiTimeout * 1000
+            }
+          )
+        }
 
         const images = parseOpenAIImagesResponse(response, this.config.logLevel === 'debug' ? logger : null)
 
